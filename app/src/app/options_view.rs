@@ -250,6 +250,7 @@ pub fn options_chain(ui: &mut Ui, o: &mut OptionsPane) -> (Option<Action>, bool)
         row_h,
         rows.len(),
         |ui, range| {
+            let mut spot_line = None;
             for ri in range {
                 let row = &rows[ri];
                 let (r, resp) = ui.allocate_exact_size(vec2(w, row_h), Sense::click());
@@ -291,14 +292,7 @@ pub fn options_chain(ui: &mut Ui, o: &mut OptionsPane) -> (Option<Action>, bool)
                 // Spot marker between the strikes that bracket it.
                 let next = rows.get(ri + 1).map(|n| n.strike);
                 if row.strike <= spot && next.is_some_and(|n| n > spot) {
-                    p.hline(r.x_range(), r.bottom(), Stroke::new(1.5, theme::accent()));
-                    let g = p.layout_no_wrap(format!("spot {spot:.2}"), mono(10.0), Color32::WHITE);
-                    let pill = Rect::from_min_size(
-                        pos2(r.left() + 2.0, r.bottom() - g.size().y / 2.0 - 1.0),
-                        g.size() + vec2(8.0, 2.0),
-                    );
-                    p.rect_filled(pill, 4.0, theme::accent());
-                    p.galley(pill.min + vec2(4.0, 1.0), g, Color32::WHITE);
+                    spot_line = Some(r);
                 }
                 resp.context_menu(|ui| {
                     if let Some(ci) = row.call
@@ -314,6 +308,18 @@ pub fn options_chain(ui: &mut Ui, o: &mut OptionsPane) -> (Option<Action>, bool)
                         ui.close();
                     }
                 });
+            }
+            // Drawn after every row so the next row cannot paint over the badge.
+            if let Some(r) = spot_line {
+                let p = ui.painter();
+                p.hline(r.x_range(), r.bottom(), Stroke::new(1.5, theme::accent()));
+                let g = p.layout_no_wrap(format!("{spot:.2}"), mono(10.0), Color32::WHITE);
+                let pill = Rect::from_min_size(
+                    pos2(r.left() + 2.0, r.bottom() - g.size().y / 2.0 - 1.0),
+                    g.size() + vec2(8.0, 2.0),
+                );
+                p.rect_filled(pill, 4.0, theme::accent());
+                p.galley(pill.min + vec2(4.0, 1.0), g, Color32::WHITE);
             }
         },
     );
