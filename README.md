@@ -66,7 +66,7 @@ systems**.
     and filed date into SQLite. Party comes from the official rosters (clerk.house.gov
     `MemberData.xml`, senate.gov `senators_cfm.xml`); politicians are keyed by bioguide ID, which
     also repairs typos in the source index.
-  - Refreshed on a schedule (hourly by default, `TR_CONGRESS_REFRESH_MIN`, `0` disables;
+  - Refreshed on a schedule (every 30 minutes by default, `TR_CONGRESS_REFRESH_MIN`, `0` disables;
     `REFRESH`/F6 forces one), incrementally — only unseen filings are fetched.
   - Panels: latest trades feed with party/chamber/side filters (`CONG`); per-ticker "who in
     Congress traded it" (`NVDA CONG`, or right-click any ticker); politician profile with trade
@@ -98,6 +98,13 @@ systems**.
     keys) in Settings and Help, and ⌘1…⌘0 open a new chart, watchlist, news, order book, world
     markets, yield curve, Congress, politicians, alerts or search pane; defaults for new charts and order books. Per-pane
     settings (chart type, indicators, drawings, filters, depth, link, tab title) save with the layout.
+  - **Options** (`AAPL OMON`, ⌘⇧O): full chains from Yahoo for US equities, ETFs and indices
+    (SPX via ^SPX): every expiration, calls and puts by strike with bid/ask/last, change,
+    volume, open interest and IV, plus Black-Scholes greeks (Δ, Γ, Θ/day, vega) computed from
+    each contract's IV, the dividend yield and the 3-month T-bill rate; in-the-money shading,
+    spot marker, ±10/±20/all strikes; offline mode shows a flagged simulated chain.
+  - **Sidebar on either side**: View menu, `SIDEBAR LEFT|RIGHT`, ⌘⌥S or Settings; saved in
+    prefs and with each layout.
   - **News** (Yahoo headlines; CoinDesk for crypto) and **order book** depth (live Binance book,
     Coinbase fallback; markets without a free public book show a clearly marked simulation).
 - **Native macOS feel** while keeping Bloomberg density and the command line: transparent title

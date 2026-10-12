@@ -80,17 +80,18 @@ impl TerminalApp {
 
         // Sidebar toggle.
         let mut tb = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(pos2(x, cy - 11.0), vec2(26.0, 22.0))));
-        if widgets::icon_button(
-            &mut tb,
-            Icon::Sidebar,
-            if MAC { "Toggle Sidebar (⌃⌘S)" } else { "Toggle Sidebar (Ctrl+S)" },
-            false,
-        )
-        .clicked()
-        {
+        if widgets::icon_button(&mut tb, Icon::Sidebar, "Toggle Sidebar", false).clicked() {
             self.sidebar_open = !self.sidebar_open;
         }
-        x += 32.0;
+        x += 30.0;
+
+        // View menu.
+        let view_r = Rect::from_min_size(pos2(x, cy - 10.0), vec2(42.0, 20.0));
+        let mut vb = ui.new_child(UiBuilder::new().max_rect(view_r));
+        let resp =
+            vb.add(egui::Button::new(RichText::new("View").font(ui_font(12.0))).frame(false).min_size(view_r.size()));
+        egui::Popup::menu(&resp).show(|ui| self.view_menu(ui));
+        x = view_r.right() + 8.0;
 
         // Data source chip (the window title itself is redundant in a compact toolbar).
         let live = !self.provider.eq_ignore_ascii_case("sample");
@@ -160,6 +161,72 @@ impl TerminalApp {
 
         let field = Rect::from_min_max(pos2(x, cy - 11.0), pos2(right.max(x + 160.0).min(x + 860.0), cy + 11.0));
         self.command_field(ui, field)
+    }
+
+    /// The View menu: sidebar visibility and side, theme, density, readouts.
+    fn view_menu(&mut self, ui: &mut Ui) {
+        use crate::prefs::{Action as A, Density, SidebarSide, ThemeMode};
+        ui.set_min_width(220.0);
+        let key = |a: A| self.prefs.hotkeys.chord(a).map(|c| c.display()).unwrap_or_default();
+        let (k_sb, k_swap, k_perf) = (key(A::ToggleSidebar), key(A::SwapSidebarSide), key(A::FrameTiming));
+        let mut changed = false;
+        if ui
+            .add(egui::Button::new(if self.sidebar_open { "Hide Sidebar" } else { "Show Sidebar" }).shortcut_text(k_sb))
+            .clicked()
+        {
+            self.sidebar_open = !self.sidebar_open;
+            ui.close();
+        }
+        let a = &mut self.prefs.appearance;
+        ui.label(RichText::new("Sidebar Position").font(ui_font(11.0)).color(muted()));
+        for (side, label) in [(SidebarSide::Left, "Left"), (SidebarSide::Right, "Right")] {
+            if ui.radio(a.sidebar_side == side, label).clicked() {
+                a.sidebar_side = side;
+                self.sidebar_open = true;
+                changed = true;
+                ui.close();
+            }
+        }
+        if ui.add(egui::Button::new("Move Sidebar to Other Side").shortcut_text(k_swap)).clicked() {
+            a.sidebar_side = a.sidebar_side.other();
+            changed = true;
+            ui.close();
+        }
+        ui.separator();
+        ui.menu_button("Appearance", |ui| {
+            for (m, label) in [(ThemeMode::System, "System"), (ThemeMode::Light, "Light"), (ThemeMode::Dark, "Dark")] {
+                if ui.radio(a.mode == m, label).clicked() {
+                    a.mode = m;
+                    changed = true;
+                    ui.close();
+                }
+            }
+        });
+        ui.menu_button("Density", |ui| {
+            for d in Density::ALL {
+                if ui.radio(a.density == d, d.label()).clicked() {
+                    a.density = d;
+                    changed = true;
+                    ui.close();
+                }
+            }
+        });
+        ui.separator();
+        if ui.add(egui::Button::new("Frame Timing").selected(self.show_perf).shortcut_text(k_perf)).clicked() {
+            self.show_perf = !self.show_perf;
+            ui.close();
+        }
+        if ui.button("Settings…").clicked() {
+            self.apply(Function::Settings);
+            ui.close();
+        }
+        if ui.button("Commands & Hotkeys").clicked() {
+            self.apply(Function::Help);
+            ui.close();
+        }
+        if changed {
+            self.save_prefs();
+        }
     }
 
     fn provider_label(&self) -> String {
@@ -395,7 +462,9 @@ impl TerminalApp {
         let mut out = Vec::new();
         let p = ui.painter();
         p.rect_filled(rect, 0.0, theme::sidebar());
-        p.vline(rect.right() - 0.5, rect.y_range(), Stroke::new(1.0, theme::border()));
+        let on_right = self.prefs.appearance.sidebar_side == crate::prefs::SidebarSide::Right;
+        let edge = if on_right { rect.left() + 0.5 } else { rect.right() - 0.5 };
+        p.vline(edge, rect.y_range(), Stroke::new(1.0, theme::border()));
         let head = Rect::from_min_size(rect.min, vec2(rect.width(), self.toolbar_h()));
         window_drag_region(ui, head, "sidebar");
         if !cfg!(target_os = "macos") {
@@ -477,6 +546,13 @@ impl TerminalApp {
             let items = [
                 (Icon::Globe, "World Markets", "WEI", Function::Wei, PaneKind::Wei),
                 (Icon::Curve, "Yield Curve", "GC", Function::Curve, PaneKind::Curve),
+                (
+                    Icon::Chart,
+                    "Options",
+                    "OMON",
+                    Function::Options,
+                    PaneKind::Options(Box::new(super::OptionsPane::new("", 0, true))),
+                ),
                 (
                     Icon::Search,
                     "Security Search",

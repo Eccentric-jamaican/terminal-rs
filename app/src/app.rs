@@ -6,6 +6,7 @@
 
 mod chrome;
 mod hotkeys_view;
+mod options_view;
 mod panels;
 mod settings_view;
 mod workspace;
@@ -49,7 +50,63 @@ pub enum PaneKind {
     Search { query: String },
     News(Box<NewsPane>),
     OrderBook(Box<BookPane>),
+    Options(Box<OptionsPane>),
     Settings,
+}
+
+pub struct OptionsPane {
+    pub symbol: String,
+    /// Selected expiration (`None` = nearest).
+    pub expiration: Option<i64>,
+    pub chain: Option<Box<tr_data::OptionChain>>,
+    /// Greeks per call and put, aligned with the chain's contracts.
+    pub call_greeks: Vec<Option<tr_core::options::Greeks>>,
+    pub put_greeks: Vec<Option<tr_core::options::Greeks>>,
+    /// Risk-free rate used for the greeks.
+    pub rate: f64,
+    pub error: Option<String>,
+    pub loading: bool,
+    pub fetched: Option<Instant>,
+    /// Strikes each side of the money (0 = all).
+    pub strikes: usize,
+    pub show_greeks: bool,
+}
+
+impl OptionsPane {
+    pub fn new(symbol: &str, strikes: usize, show_greeks: bool) -> Self {
+        Self {
+            symbol: symbol.into(),
+            expiration: None,
+            chain: None,
+            call_greeks: Vec::new(),
+            put_greeks: Vec::new(),
+            rate: 0.04,
+            error: None,
+            loading: true,
+            fetched: None,
+            strikes,
+            show_greeks,
+        }
+    }
+
+    /// Store a chain and derive greeks from each contract's implied volatility.
+    pub fn set_chain(&mut self, chain: Box<tr_data::OptionChain>, rate: f64, now: i64) {
+        // Expiry at the 16:00 New York close (≈ 20:00 UTC) of the expiration date.
+        let t = ((chain.expiration + 20 * 3600 - now) as f64 / (365.0 * 86_400.0)).max(0.5 / 365.0);
+        let g = |call: bool, c: &tr_data::OptionContract| {
+            tr_core::options::black_scholes(call, chain.spot, c.strike, t, rate, chain.dividend_yield, c.iv?)
+                .map(|(_, g)| g)
+        };
+        self.call_greeks = chain.calls.iter().map(|c| g(true, c)).collect();
+        self.put_greeks = chain.puts.iter().map(|c| g(false, c)).collect();
+        self.rate = rate;
+        if self.expiration.is_none() || !chain.expirations.contains(&chain.expiration) {
+            self.expiration = Some(chain.expiration);
+        }
+        self.chain = Some(chain);
+        self.error = None;
+        self.loading = false;
+    }
 }
 
 pub struct NewsPane {
@@ -107,6 +164,7 @@ impl PaneKind {
                 None => "Top News".into(),
             },
             PaneKind::OrderBook(b) => format!("{} Depth", short(&b.symbol)),
+            PaneKind::Options(o) => format!("{} Options", short(&o.symbol)),
             PaneKind::Settings => "Settings".into(),
         }
     }
@@ -125,6 +183,7 @@ impl PaneKind {
             PaneKind::Search { .. } => "SECF",
             PaneKind::News(_) => "CN",
             PaneKind::OrderBook(_) => "OB",
+            PaneKind::Options(_) => "OMON",
             PaneKind::Settings => "PDF",
         }
     }
@@ -136,12 +195,20 @@ impl PaneKind {
             PaneKind::Ticker { symbol, .. } => Some(symbol),
             PaneKind::News(n) => n.symbol.as_deref(),
             PaneKind::OrderBook(b) => Some(&b.symbol),
+            PaneKind::Options(o) => Some(&o.symbol),
             _ => None,
         }
     }
 
     fn follows_symbol(&self) -> bool {
-        matches!(self, PaneKind::Chart(_) | PaneKind::Ticker { .. } | PaneKind::News(_) | PaneKind::OrderBook(_))
+        matches!(
+            self,
+            PaneKind::Chart(_)
+                | PaneKind::Ticker { .. }
+                | PaneKind::News(_)
+                | PaneKind::OrderBook(_)
+                | PaneKind::Options(_)
+        )
     }
 
     fn settings(&self) -> PaneSettings {
@@ -175,6 +242,9 @@ impl PaneKind {
                 PaneSettings::OrderBook { symbol: b.symbol.clone(), depth: b.depth, group: b.group }
             }
             PaneKind::Settings => PaneSettings::Settings,
+            PaneKind::Options(o) => {
+                PaneSettings::Options { symbol: o.symbol.clone(), strikes: o.strikes, greeks: o.show_greeks }
+            }
         }
     }
 
@@ -218,6 +288,9 @@ impl PaneKind {
                 PaneKind::OrderBook(Box::new(BookPane::new(&symbol, depth, group)))
             }
             PaneSettings::Settings => PaneKind::Settings,
+            PaneSettings::Options { symbol, strikes, greeks } => {
+                PaneKind::Options(Box::new(OptionsPane::new(&symbol, strikes, greeks)))
+            }
         }
     }
 }
@@ -355,6 +428,8 @@ pub struct TerminalApp {
     pol_search: String,
     alerts: Vec<Alert>,
     congress_status: String,
+    /// When the last Congress ingest finished.
+    congress_checked: Option<chrono::DateTime<chrono::Local>>,
 
     watchlist: Vec<String>,
     quotes: HashMap<String, Quote>,
@@ -459,6 +534,7 @@ impl TerminalApp {
             pol_search: String::new(),
             alerts: Vec::new(),
             congress_status: String::new(),
+            congress_checked: None,
             watchlist: DEFAULT_WATCHLIST.map(String::from).to_vec(),
             quotes: HashMap::new(),
             last_quotes: None,
@@ -582,6 +658,10 @@ impl TerminalApp {
                 self.open_panel(PaneKind::OrderBook(Box::new(BookPane::new(&s, depth, 0.0))));
                 self.status = format!("{s}: order book");
             }
+            Command::SymbolFunction(s, Function::Options) => {
+                self.open_panel(PaneKind::Options(Box::new(OptionsPane::new(&s, 12, true))));
+                self.status = format!("{s}: option chain");
+            }
             Command::SymbolFunction(s, f @ (Function::NewPanel(_) | Function::Split { .. })) => {
                 self.apply_with_symbol(f, Some(s));
             }
@@ -671,6 +751,22 @@ impl TerminalApp {
                 self.open_panel(PaneKind::OrderBook(Box::new(BookPane::new(&sym, depth, 0.0))));
             }
             Function::Settings => self.open_panel(PaneKind::Settings),
+            Function::Options => {
+                let sym = self.optionable_symbol();
+                self.open_panel(PaneKind::Options(Box::new(OptionsPane::new(&sym, 12, true))));
+            }
+            Function::Sidebar(arg) => {
+                let side = &mut self.prefs.appearance.sidebar_side;
+                match arg.as_str() {
+                    "LEFT" => *side = prefs::SidebarSide::Left,
+                    "RIGHT" => *side = prefs::SidebarSide::Right,
+                    "SWAP" | "FLIP" | "OTHER" => *side = side.other(),
+                    "SHOW" | "ON" => self.sidebar_open = true,
+                    "HIDE" | "OFF" => self.sidebar_open = false,
+                    _ => self.sidebar_open = !self.sidebar_open,
+                }
+                self.save_prefs();
+            }
             Function::Theme(t) => {
                 let a = &mut self.prefs.appearance;
                 for w in t.split_whitespace() {
@@ -797,6 +893,22 @@ impl TerminalApp {
                         *loading = false;
                     }
                 }
+                Response::Options { pane, symbol, chain } => {
+                    // Greeks use the 3-month T-bill yield when the curve is loaded.
+                    let rate = self.curves.as_ref().and_then(|c| c.current.get("US3M")).map_or(0.04, |y| y / 100.0);
+                    if let Some(p) = self.panes.iter_mut().find(|p| p.id == pane)
+                        && let PaneKind::Options(o) = &mut p.kind
+                        && o.symbol == symbol
+                    {
+                        match chain {
+                            Ok(c) => o.set_chain(c, rate, chrono::Utc::now().timestamp()),
+                            Err(e) => {
+                                o.error = Some(e);
+                                o.loading = false;
+                            }
+                        }
+                    }
+                }
                 Response::News { pane, symbol, items } => {
                     if let Some(p) = self.panes.iter_mut().find(|p| p.id == pane)
                         && let PaneKind::News(n) = &mut p.kind
@@ -839,12 +951,39 @@ impl TerminalApp {
                 Response::Curves(c) => self.curves = Some(c),
                 Response::SearchHits { query, hits } => self.net_hits = (query, hits),
                 Response::CongressRefreshed(summary) => {
-                    self.congress_status = format!("last ingest: {summary}");
+                    self.congress_status = summary.to_string();
+                    self.congress_checked = Some(chrono::Local::now());
                     self.status = format!("Congress disclosures updated: {summary}");
                     self.refresh_congress_views();
                 }
             }
         }
+    }
+
+    /// Freshness line for the Congress feed: last check, newest filing, next check.
+    fn congress_freshness(&self) -> String {
+        let newest = self.latest.iter().map(|t| t.filed_date).max();
+        let minutes = std::env::var("TR_CONGRESS_REFRESH_MIN")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(crate::worker::CONGRESS_REFRESH_MIN as i64);
+        let mut parts = Vec::new();
+        match self.congress_checked {
+            Some(t) => {
+                parts.push(format!("checked {}", t.format("%H:%M")));
+                if minutes > 0 {
+                    parts.push(format!("next {}", (t + chrono::Duration::minutes(minutes)).format("%H:%M")));
+                }
+            }
+            None => parts.push("checking Senate eFD + House Clerk…".into()),
+        }
+        if let Some(d) = newest {
+            parts.push(format!("newest filing {d}"));
+        }
+        if !self.congress_status.is_empty() {
+            parts.push(self.congress_status.clone());
+        }
+        parts.join(" · ")
     }
 
     fn refresh_congress_views(&mut self) {
@@ -1002,6 +1141,7 @@ impl TerminalApp {
             A::NextPane => self.cycle_focus(1),
             A::PrevPane => self.cycle_focus(-1),
             A::ToggleSidebar => self.sidebar_open = !self.sidebar_open,
+            A::SwapSidebarSide => self.apply(Function::Sidebar("SWAP".into())),
             A::SplitRight => self.apply(Function::Split { down: false, panel: String::new() }),
             A::SplitDown => self.apply(Function::Split { down: true, panel: String::new() }),
             A::NewTab => {
@@ -1060,6 +1200,14 @@ impl TerminalApp {
                 PaneKind::News(n) if n.fetched.is_none_or(|t| t.elapsed() > Duration::from_secs(300)) => {
                     n.fetched = Some(Instant::now());
                     self.worker.send(Request::News { pane: p.id, symbol: n.symbol.clone() });
+                }
+                PaneKind::Options(o) if o.fetched.is_none_or(|t| t.elapsed() > Duration::from_secs(30)) => {
+                    o.fetched = Some(Instant::now());
+                    self.worker.send(Request::Options {
+                        pane: p.id,
+                        symbol: o.symbol.clone(),
+                        expiration: o.expiration,
+                    });
                 }
                 PaneKind::OrderBook(b) if b.fetched.is_none_or(|t| t.elapsed() > Duration::from_millis(1000)) => {
                     b.fetched = Some(Instant::now());
@@ -1176,7 +1324,12 @@ impl eframe::App for TerminalApp {
             0.9,
         );
         let sb_w = (SIDEBAR_W * open).round();
-        let main = Rect::from_min_max(pos2(screen.left() + sb_w, screen.top()), screen.max);
+        let right_side = self.prefs.appearance.sidebar_side == prefs::SidebarSide::Right;
+        let main = if right_side {
+            Rect::from_min_max(screen.min, pos2(screen.right() - sb_w, screen.bottom()))
+        } else {
+            Rect::from_min_max(pos2(screen.left() + sb_w, screen.top()), screen.max)
+        };
         ui.painter().rect_filled(main, 0.0, theme::window());
         let toolbar = Rect::from_min_size(main.min, vec2(main.width(), self.toolbar_h()));
         let status = Rect::from_min_max(pos2(main.left(), main.bottom() - STATUS_H), main.max);
@@ -1189,15 +1342,22 @@ impl eframe::App for TerminalApp {
         self.hotkeys(&ctx);
         let mut sidebar_cmds = Vec::new();
         if sb_w >= 1.0 {
-            let full = Rect::from_min_size(
-                pos2(screen.left() + sb_w - SIDEBAR_W, screen.top()),
-                vec2(SIDEBAR_W, screen.height()),
-            );
+            // The sidebar slides in from its edge.
+            let x = if right_side { screen.right() - sb_w } else { screen.left() + sb_w - SIDEBAR_W };
+            let full = Rect::from_min_size(pos2(x, screen.top()), vec2(SIDEBAR_W, screen.height()));
             let mut child = ui.new_child(UiBuilder::new().max_rect(full).id_salt("sidebar-root"));
-            child.set_clip_rect(Rect::from_min_max(screen.min, pos2(screen.left() + sb_w, screen.bottom())));
+            let visible = if right_side {
+                Rect::from_min_max(pos2(screen.right() - sb_w, screen.top()), screen.max)
+            } else {
+                Rect::from_min_max(screen.min, pos2(screen.left() + sb_w, screen.bottom()))
+            };
+            child.set_clip_rect(visible);
             sidebar_cmds = self.sidebar(&mut child, full);
         }
-        self.toolbar(ui, toolbar, (self.traffic_inset() - sb_w).max(0.0));
+        // The traffic lights sit at the window's left edge: clear them unless a left
+        // sidebar already covers that corner.
+        let inset = if right_side { self.traffic_inset() } else { (self.traffic_inset() - sb_w).max(0.0) };
+        self.toolbar(ui, toolbar, inset);
         self.status_bar(ui, status);
 
         let mut actions = Vec::new();

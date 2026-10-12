@@ -92,4 +92,18 @@ mod markets {
         assert!(b.bids[0].0 < b.asks[0].0 && !b.simulated);
         assert!(m.order_book("AAPL US Equity", 20).await.is_err());
     }
+
+    #[tokio::test]
+    #[ignore = "network"]
+    async fn option_chains() {
+        let m = m();
+        let c = m.options("AAPL US Equity", None).await.unwrap();
+        assert!(!c.simulated && c.spot > 1.0 && c.expirations.len() > 5);
+        assert!(!c.calls.is_empty() && !c.puts.is_empty());
+        let later = m.options("AAPL US Equity", Some(c.expirations[3])).await.unwrap();
+        assert_eq!(later.expiration, c.expirations[3]);
+        let spx = m.options("SPX Index", None).await.unwrap();
+        assert!(spx.calls.len() > 20, "index options");
+        assert!(m.options("BTCUSD Curncy", None).await.is_err());
+    }
 }

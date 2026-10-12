@@ -128,6 +128,14 @@ impl TerminalApp {
         color_override(ui, "Up / gains", &mut a.up, base.up);
         color_override(ui, "Down / losses", &mut a.down, base.down);
         color_override(ui, "Highlight (tickers)", &mut a.highlight, base.amber);
+        row(ui, "Sidebar position", |ui| {
+            use crate::prefs::SidebarSide;
+            let sides = [SidebarSide::Left, SidebarSide::Right];
+            let sel = sides.iter().position(|s| *s == a.sidebar_side);
+            if let Some(i) = widgets::segmented(ui, "sidebar-side", &["Left", "Right"], sel, 22.0) {
+                a.sidebar_side = sides[i];
+            }
+        });
         if cfg!(target_os = "macos") {
             row(ui, "Sidebar vibrancy", |ui| {
                 ui.checkbox(&mut a.vibrancy, "Translucent sidebar (applies on next launch)");

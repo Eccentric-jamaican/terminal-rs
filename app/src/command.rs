@@ -165,6 +165,10 @@ pub enum Function {
     News,
     /// Order book depth (levels).
     OrderBook(Option<usize>),
+    /// Option chain monitor (Bloomberg OMON).
+    Options,
+    /// `SIDEBAR LEFT|RIGHT|TOGGLE|SHOW|HIDE|SWAP`.
+    Sidebar(String),
     Settings,
     /// `THEME LIGHT|DARK|SYSTEM|COMPACT|REGULAR|COMFORTABLE`.
     Theme(String),
@@ -245,6 +249,8 @@ fn parse_function(head: &str, rest: &[&str]) -> Option<Function> {
         }),
         "N" | "CN" | "NEWS" | "TOP" => Function::News,
         "OB" | "BOOK" | "DEPTH" | "DOM" => Function::OrderBook(num(rest.first())),
+        "OMON" | "OMST" | "OPT" | "OPTIONS" | "CHAIN" => Function::Options,
+        "SIDEBAR" | "SB" => Function::Sidebar(words().join(" ")),
         "PREFS" | "SETTINGS" | "PDF" | "CONFIG" => Function::Settings,
         "THEME" => Function::Theme(words().join(" ")),
         "TITLE" | "RENAME" => Function::Title(joined()),
@@ -351,6 +357,9 @@ fn describe(f: &Function) -> String {
         Function::Link(None) => "Unlink focused pane".into(),
         Function::News => "News headlines".into(),
         Function::OrderBook(_) => "Order book (depth)".into(),
+        Function::Options => "Option chain: calls and puts by strike, IV and greeks".into(),
+        Function::Sidebar(s) if s.is_empty() => "Toggle the sidebar".into(),
+        Function::Sidebar(s) => format!("Sidebar {}", s.to_lowercase()),
         Function::Settings => "Settings: theme, fonts, density, hotkeys, panels, layouts".into(),
         Function::Theme(t) => format!("Theme {t}"),
         Function::Title(t) => format!("Rename tab to {t:?}"),
@@ -432,6 +441,10 @@ mod tests {
             Some(Command::SymbolFunction("BTCUSD Curncy".into(), Function::OrderBook(Some(50))))
         );
         assert_eq!(parse("PREFS"), Some(Command::Function(Function::Settings)));
+        assert_eq!(parse("AAPL OMON"), Some(Command::SymbolFunction("AAPL US Equity".into(), Function::Options)));
+        assert_eq!(parse("SPX INDEX OMON"), Some(Command::SymbolFunction("SPX Index".into(), Function::Options)));
+        assert_eq!(parse("OMON"), Some(Command::Function(Function::Options)));
+        assert_eq!(parse("SIDEBAR RIGHT"), Some(Command::Function(Function::Sidebar("RIGHT".into()))));
     }
 
     #[test]

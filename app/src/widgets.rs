@@ -92,6 +92,7 @@ pub enum Icon {
     List,
     Star,
     Grid,
+    Chart,
     Plus,
     More,
     Gear,
@@ -184,6 +185,9 @@ pub fn draw_icon(p: &egui::Painter, r: Rect, icon: Icon, color: Color32) {
             for (x, y) in [(-3.5, -3.5), (3.5, -3.5), (-3.5, 3.5), (3.5, 3.5)] {
                 p.rect_stroke(Rect::from_center_size(pt(x, y), vec2(5.0 * u, 5.0 * u)), 1.5, s, StrokeKind::Middle);
             }
+        }
+        Icon::Chart => {
+            p.add(Shape::line(vec![pt(-6.0, 4.0), pt(-2.0, -1.0), pt(1.0, 2.0), pt(6.0, -4.5)], s));
         }
         Icon::Plus => {
             p.line_segment([pt(-5.0, 0.0), pt(5.0, 0.0)], s);

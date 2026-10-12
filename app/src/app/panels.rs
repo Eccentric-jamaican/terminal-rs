@@ -24,14 +24,13 @@ impl TerminalApp {
             actions.append(&mut c.actions);
             return (actions, clicked);
         }
+        let freshness = self.congress_freshness();
         let inner = rect.shrink2(vec2(dp(8.0), dp(4.0)));
         let mut child = ui.new_child(UiBuilder::new().max_rect(inner).id_salt(("pane", id)));
         child.set_clip_rect(inner.intersect(ui.clip_rect()));
         let ui = &mut child;
         match &mut self.panes[i].kind {
-            PaneKind::Feed { filter } => {
-                actions.extend(congress_view::feed(ui, &self.latest, filter, &self.congress_status))
-            }
+            PaneKind::Feed { filter } => actions.extend(congress_view::feed(ui, &self.latest, filter, &freshness)),
             PaneKind::Ticker { symbol, trades, loading } => {
                 if *loading {
                     ui.label(RichText::new("Loading…").color(muted()));
@@ -67,6 +66,13 @@ impl TerminalApp {
                 if let Some(refresh) = news(ui, n, offline) {
                     n.fetched = None;
                     n.loading = refresh;
+                }
+            }
+            PaneKind::Options(o) => {
+                let (a, refetch) = super::options_view::options_chain(ui, o);
+                actions.extend(a);
+                if refetch {
+                    o.fetched = None;
                 }
             }
             PaneKind::OrderBook(b) => {

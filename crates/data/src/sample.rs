@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tr_core::{Bar, Timeframe, sample};
 
-use crate::{LiveFeed, MarketData, OrderBook, security};
+use crate::{LiveFeed, MarketData, OptionChain, OrderBook, security};
 
 /// Deterministic synthetic data anchored at a fixed "now" per process, so paging is
 /// consistent: page N+1 is exactly the bars preceding page N. Levels and volatility
@@ -52,6 +52,12 @@ impl MarketData for SampleProvider {
         Ok(crate::clip(self.bars(symbol, tf), end, limit))
     }
 
+    /// A synthetic chain priced with Black-Scholes around the last price.
+    async fn options(&self, symbol: &str, expiration: Option<i64>) -> Result<OptionChain> {
+        let spot = self.bars(symbol, Timeframe::D1).last().map(|b| b.close).unwrap_or(100.0);
+        Ok(simulated_chain(symbol, spot, expiration, chrono::Utc::now().timestamp()))
+    }
+
     /// A synthetic book around the last price; sizes vary with the clock so it moves.
     async fn order_book(&self, symbol: &str, depth: usize) -> Result<OrderBook> {
         let last = self.bars(symbol, Timeframe::M1).last().map(|b| b.close).unwrap_or(100.0);
@@ -88,6 +94,81 @@ impl MarketData for SampleProvider {
             }
         });
         Some(rx)
+    }
+}
+
+/// Deterministic synthetic option chain: weekly expirations for two months then monthly,
+/// strikes around `spot`, prices from Black-Scholes with a volatility smile.
+pub fn simulated_chain(symbol: &str, spot: f64, expiration: Option<i64>, now: i64) -> OptionChain {
+    let day = 86_400;
+    // Fridays 20:00 UTC (close), weekly for 8 weeks, then every 4 weeks.
+    let next_friday = {
+        let d = now.div_euclid(day);
+        let dow = (d + 4).rem_euclid(7); // 0 = Sunday
+        (d + (5 - dow).rem_euclid(7)) * day + 20 * 3600
+    };
+    let first = if next_friday <= now { next_friday + 7 * day } else { next_friday };
+    let mut expirations: Vec<i64> = (0..8).map(|k| first + k * 7 * day).collect();
+    expirations.extend((1..10).map(|k| first + (7 + 4 * k) * 7 * day));
+    let exp = expiration.filter(|e| expirations.contains(e)).unwrap_or(expirations[0]);
+    let t = ((exp - now) as f64 / (365.0 * day as f64)).max(1.0 / 365.0);
+    let base_vol = security(symbol).class.sample_vol().clamp(0.12, 0.9);
+    let step = {
+        let raw = spot * 0.0125;
+        let mag = 10f64.powf(raw.log10().floor());
+        [1.0, 2.5, 5.0, 10.0].into_iter().map(|m| m * mag).find(|s| *s >= raw).unwrap_or(raw)
+    };
+    let atm = (spot / step).round() * step;
+    let mut rng = sample::Rng::new(sample::seed_for(symbol) ^ exp as u64);
+    let (mut calls, mut puts) = (Vec::new(), Vec::new());
+    for k in -20i32..=20 {
+        let strike = atm + k as f64 * step;
+        if strike <= 0.0 {
+            continue;
+        }
+        let m = (strike / spot).ln();
+        let vol = base_vol * (1.0 + 1.6 * m * m - 0.35 * m);
+        for call in [true, false] {
+            let Some((px, _)) = tr_core::options::black_scholes(call, spot, strike, t, 0.04, 0.0, vol) else {
+                continue;
+            };
+            let px = px.max(0.01);
+            let spread = (px * 0.03).max(0.01);
+            let oi = (2_000.0 * (-(m * m) * 40.0).exp() * (0.5 + rng.f64())) as u64;
+            let c = crate::OptionContract {
+                contract: format!(
+                    "{}{}{}{:08}",
+                    security(symbol).ticker,
+                    chrono::DateTime::from_timestamp(exp, 0)
+                        .map(|d| d.format("%y%m%d").to_string())
+                        .unwrap_or_default(),
+                    if call { 'C' } else { 'P' },
+                    (strike * 1000.0).round() as u64
+                ),
+                strike,
+                last: Some((px * (1.0 + 0.02 * rng.normal())).max(0.01)),
+                change: Some(px * 0.05 * rng.normal()),
+                bid: Some((px - spread / 2.0).max(0.0)),
+                ask: Some(px + spread / 2.0),
+                volume: Some(oi / 5),
+                open_interest: Some(oi),
+                iv: Some(vol),
+                in_the_money: if call { strike < spot } else { strike > spot },
+            };
+            if call { calls.push(c) } else { puts.push(c) }
+        }
+    }
+    OptionChain {
+        underlying: security(symbol).ticker,
+        spot,
+        dividend_yield: 0.0,
+        expirations,
+        expiration: exp,
+        calls,
+        puts,
+        ts: now,
+        source: "Simulated".into(),
+        simulated: true,
     }
 }
 

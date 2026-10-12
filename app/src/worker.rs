@@ -23,7 +23,16 @@ use crate::theme;
 
 pub type PaneId = u64;
 
+/// Minutes between Congress disclosure checks (`TR_CONGRESS_REFRESH_MIN`; 0 disables).
+pub const CONGRESS_REFRESH_MIN: u64 = 30;
+
 pub enum Request {
+    /// Option chain for one expiration (`None` = nearest).
+    Options {
+        pane: PaneId,
+        symbol: String,
+        expiration: Option<i64>,
+    },
     /// Headlines for a market key (`None` = general market news).
     News {
         pane: PaneId,
@@ -110,6 +119,11 @@ pub struct Profile {
 }
 
 pub enum Response {
+    Options {
+        pane: PaneId,
+        symbol: String,
+        chain: Result<Box<tr_data::OptionChain>, String>,
+    },
     News {
         pane: PaneId,
         symbol: Option<String>,
@@ -259,7 +273,10 @@ impl Worker {
         // Scheduled congressional disclosure refresh.
         let s = shared.clone();
         rt.spawn(async move {
-            let minutes: u64 = std::env::var("TR_CONGRESS_REFRESH_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+            let minutes: u64 = std::env::var("TR_CONGRESS_REFRESH_MIN")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(CONGRESS_REFRESH_MIN);
             if minutes == 0 {
                 return;
             }
@@ -554,6 +571,10 @@ async fn handle(s: &Arc<Shared>, req: Request) {
             Ok(c) => s.send(Response::Curves(Box::new(c))),
             Err(e) => s.send(Response::Status(format!("yield curve: {e:#}"))),
         },
+        Request::Options { pane, symbol, expiration } => {
+            let chain = s.provider.options(&symbol, expiration).await.map(Box::new).map_err(|e| format!("{e:#}"));
+            s.send(Response::Options { pane, symbol, chain });
+        }
         Request::News { pane, symbol } => {
             let items = s.provider.news(symbol.as_deref()).await.map_err(|e| format!("{e:#}"));
             s.send(Response::News { pane, symbol, items });

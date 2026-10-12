@@ -251,6 +251,7 @@ impl TerminalApp {
                     (&["GC"], "US Treasury yield curve"),
                     (&["N", "AAPL CN"], "News headlines (for a security)"),
                     (&["OB", "BTCUSD CRNCY OB 50"], "Order book depth"),
+                    (&["OMON", "AAPL OMON", "SPX INDEX OMON"], "Option chain: calls/puts by strike, IV, greeks"),
                     (&["CONG", "NVDA CONG"], "Congress trades feed / who traded a ticker"),
                     (&["POL", "POL PELOSI", "TRACK PELOSI"], "Politicians, profiles and alerts"),
                     (&["WL", "WL ADD SOLUSD CRNCY"], "Watchlist"),
@@ -286,6 +287,7 @@ impl TerminalApp {
                     (&["POP"], "Pop the pane out to its own window (close it to dock back)"),
                     (&["LINK BLUE", "LINK OFF"], "Colour link group: one security drives linked panes"),
                     (&["TITLE Desk", "CLOSE"], "Rename or close the focused tab"),
+                    (&["SIDEBAR RIGHT", "SIDEBAR LEFT", "SIDEBAR"], "Sidebar side, or show/hide (also the View menu)"),
                 ],
             );
             para(

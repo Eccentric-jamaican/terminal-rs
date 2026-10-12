@@ -15,7 +15,7 @@ use crate::alpaca::AlpacaProvider;
 use crate::crypto::CryptoProvider;
 use crate::treasury::TreasuryProvider;
 use crate::yahoo::{YahooProvider, yahoo_symbol};
-use crate::{LiveFeed, MarketData, NewsItem, OrderBook, Quote, SearchHit, YieldCurves, security};
+use crate::{LiveFeed, MarketData, NewsItem, OptionChain, OrderBook, Quote, SearchHit, YieldCurves, security};
 
 pub struct Markets {
     yahoo: YahooProvider,
@@ -129,6 +129,20 @@ impl MarketData for Markets {
             None => "stock market".into(),
         };
         self.yahoo.news(&q).await
+    }
+
+    /// Listed options on US equities, ETFs and indices (Yahoo).
+    async fn options(&self, symbol: &str, expiration: Option<i64>) -> Result<OptionChain> {
+        let sec = security(symbol);
+        match sec.class {
+            AssetClass::Equity | AssetClass::Etf | AssetClass::Index => {
+                let y = yahoo_symbol(&sec);
+                // Yahoo lists S&P 500 index options under ^SPX, not the ^GSPC quote symbol.
+                let y = if y == "^GSPC" { "^SPX".to_string() } else { y };
+                self.yahoo.options(&y, expiration).await
+            }
+            _ => bail!("listed options are available for US equities, ETFs and indices, not {}", sec.key()),
+        }
     }
 
     async fn order_book(&self, symbol: &str, depth: usize) -> Result<OrderBook> {

@@ -16,6 +16,9 @@ const BASE: &str = "https://query1.finance.yahoo.com/v8/finance/chart";
 
 pub struct YahooProvider {
     client: reqwest::Client,
+    /// Session crumb for endpoints that require one (options); the cookie lives in the
+    /// client's cookie store.
+    crumb: tokio::sync::Mutex<Option<String>>,
 }
 
 impl YahooProvider {
@@ -24,8 +27,9 @@ impl YahooProvider {
             // Yahoo rejects requests without a browser-like user agent.
             .user_agent("Mozilla/5.0 (compatible; terminal-rs)")
             .timeout(Duration::from_secs(20))
+            .cookie_store(true)
             .build()?;
-        Ok(Self { client })
+        Ok(Self { client, crumb: tokio::sync::Mutex::new(None) })
     }
 
     async fn chart(&self, symbol: &str, interval: &str, period1: i64, period2: i64) -> Result<Chart> {
@@ -197,7 +201,51 @@ impl MarketData for YahooProvider {
     }
 }
 
+const OPTIONS: &str = "https://query2.finance.yahoo.com/v7/finance/options";
+
 impl YahooProvider {
+    /// A session crumb: visiting fc.yahoo.com sets the consent cookie, then getcrumb
+    /// returns the token bound to it. Cached until a request is rejected.
+    async fn crumb(&self, refresh: bool) -> Result<String> {
+        let mut guard = self.crumb.lock().await;
+        if let Some(c) = guard.as_ref().filter(|_| !refresh) {
+            return Ok(c.clone());
+        }
+        // fc.yahoo.com answers 404 but sets the cookie; only transport errors matter.
+        self.client.get("https://fc.yahoo.com").send().await.context("yahoo session")?;
+        let resp = self.client.get("https://query2.finance.yahoo.com/v1/test/getcrumb").send().await?;
+        let crumb = resp.text().await?.trim().to_string();
+        if crumb.is_empty() || crumb.contains('{') || crumb.len() > 64 {
+            bail!("yahoo did not issue a crumb");
+        }
+        *guard = Some(crumb.clone());
+        Ok(crumb)
+    }
+
+    /// Option chain for a Yahoo symbol and expiration (`None` = nearest).
+    pub async fn options(&self, symbol: &str, expiration: Option<i64>) -> Result<crate::OptionChain> {
+        let mut last_err = None;
+        for refresh in [false, true] {
+            let crumb = self.crumb(refresh).await?;
+            let mut q = vec![("crumb", crumb)];
+            if let Some(e) = expiration {
+                q.push(("date", e.to_string()));
+            }
+            let resp = self.client.get(format!("{OPTIONS}/{}", urlencode(symbol))).query(&q).send().await?;
+            let status = resp.status();
+            let body = resp.text().await?;
+            if status.as_u16() == 401 || body.contains("Invalid Crumb") {
+                last_err = Some(anyhow!("yahoo options: crumb rejected"));
+                continue;
+            }
+            if !status.is_success() {
+                bail!("yahoo options: HTTP {status}");
+            }
+            return parse_options(&body);
+        }
+        Err(last_err.unwrap_or_else(|| anyhow!("yahoo options failed")))
+    }
+
     /// Headlines related to a Yahoo symbol or free-text query.
     pub async fn news(&self, query: &str) -> Result<Vec<crate::NewsItem>> {
         let resp = self
@@ -211,6 +259,61 @@ impl YahooProvider {
         }
         parse_news(&resp.text().await?)
     }
+}
+
+/// Parse `/v7/finance/options/{symbol}`.
+pub fn parse_options(json: &str) -> Result<crate::OptionChain> {
+    let v: serde_json::Value = serde_json::from_str(json).context("parsing Yahoo options")?;
+    let r = &v["optionChain"]["result"][0];
+    if r.is_null() {
+        let e = v["optionChain"]["error"]["description"].as_str().unwrap_or("no option chain");
+        bail!("yahoo options: {e}");
+    }
+    let q = &r["quote"];
+    let spot = q["regularMarketPrice"].as_f64().ok_or_else(|| anyhow!("option chain has no underlying price"))?;
+    let num = |c: &serde_json::Value, k: &str| c[k].as_f64().filter(|x| x.is_finite());
+    let contracts = |side: &serde_json::Value| -> Vec<crate::OptionContract> {
+        let mut out: Vec<crate::OptionContract> = side
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|c| {
+                        Some(crate::OptionContract {
+                            contract: c["contractSymbol"].as_str()?.to_string(),
+                            strike: c["strike"].as_f64()?,
+                            last: num(c, "lastPrice"),
+                            change: num(c, "change"),
+                            bid: num(c, "bid"),
+                            ask: num(c, "ask"),
+                            volume: c["volume"].as_u64(),
+                            open_interest: c["openInterest"].as_u64(),
+                            // Yahoo reports ~0 as a placeholder for illiquid contracts.
+                            iv: num(c, "impliedVolatility").filter(|x| *x >= 0.005),
+                            in_the_money: c["inTheMoney"].as_bool().unwrap_or(false),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.sort_by(|a, b| a.strike.total_cmp(&b.strike));
+        out
+    };
+    let o = &r["options"][0];
+    let mut expirations: Vec<i64> =
+        r["expirationDates"].as_array().map(|a| a.iter().filter_map(|x| x.as_i64()).collect()).unwrap_or_default();
+    expirations.sort_unstable();
+    Ok(crate::OptionChain {
+        underlying: r["underlyingSymbol"].as_str().unwrap_or_default().to_string(),
+        spot,
+        dividend_yield: q["trailingAnnualDividendYield"].as_f64().unwrap_or(0.0).clamp(0.0, 0.2),
+        expiration: o["expirationDate"].as_i64().or(expirations.first().copied()).unwrap_or_default(),
+        expirations,
+        calls: contracts(&o["calls"]),
+        puts: contracts(&o["puts"]),
+        ts: q["regularMarketTime"].as_i64().unwrap_or_default(),
+        source: "Yahoo".into(),
+        simulated: false,
+    })
 }
 
 /// Parse the `news` array of `/v1/finance/search`, newest first.
@@ -355,6 +458,24 @@ mod tests {
         assert_eq!(parse_chart(json).unwrap().bars.len(), 1);
         let err = r#"{"chart":{"result":null,"error":{"code":"Not Found","description":"No data found"}}}"#;
         assert!(parse_chart(err).is_err());
+    }
+
+    #[test]
+    fn options_fixture() {
+        let c = parse_options(include_str!("../tests/fixtures/yahoo_options.json")).unwrap();
+        assert_eq!(c.underlying, "AAPL");
+        assert!((c.spot - 340.155).abs() < 1e-9);
+        assert_eq!(c.expirations.len(), 24);
+        assert!(c.expirations.windows(2).all(|w| w[0] < w[1]));
+        assert_eq!(c.expiration, c.expirations[0]);
+        assert_eq!((c.calls.len(), c.puts.len()), (8, 8));
+        assert!(c.calls.windows(2).all(|w| w[0].strike < w[1].strike));
+        let k = c.calls.iter().find(|k| k.strike < c.spot).unwrap();
+        assert!(k.in_the_money && k.iv.is_some() && k.bid.is_some() && k.open_interest.is_some());
+        assert!(c.calls.iter().all(|k| k.contract.starts_with("AAPL")));
+        assert!(!c.simulated && c.dividend_yield > 0.0);
+        let err = r#"{"optionChain":{"result":[],"error":{"description":"No data found"}}}"#;
+        assert!(parse_options(err).is_err());
     }
 
     #[test]

@@ -16,6 +16,23 @@ pub enum ThemeMode {
     Dark,
 }
 
+/// Which window edge the sidebar sits on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SidebarSide {
+    #[default]
+    Left,
+    Right,
+}
+
+impl SidebarSide {
+    pub fn other(self) -> Self {
+        match self {
+            SidebarSide::Left => SidebarSide::Right,
+            SidebarSide::Right => SidebarSide::Left,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Density {
     Compact,
@@ -119,6 +136,7 @@ pub struct Appearance {
     pub font_scale: f32,
     pub density: Density,
     pub vibrancy: bool,
+    pub sidebar_side: SidebarSide,
 }
 
 impl Default for Appearance {
@@ -134,6 +152,7 @@ impl Default for Appearance {
             font_scale: 1.0,
             density: Density::Regular,
             vibrancy: true,
+            sidebar_side: SidebarSide::Left,
         }
     }
 }
@@ -174,6 +193,7 @@ pub enum Action {
     NextPane,
     PrevPane,
     ToggleSidebar,
+    SwapSidebarSide,
     SplitRight,
     SplitDown,
     NewTab,
@@ -191,6 +211,7 @@ pub enum Action {
     NewPoliticians,
     NewAlerts,
     NewSearch,
+    NewOptions,
     DrawTrendline,
     DrawHorizontal,
     DrawVertical,
@@ -210,7 +231,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 43] = [
+    pub const ALL: [Action; 45] = [
         Action::Help,
         Action::Congress,
         Action::Politicians,
@@ -221,6 +242,7 @@ impl Action {
         Action::NextPane,
         Action::PrevPane,
         Action::ToggleSidebar,
+        Action::SwapSidebarSide,
         Action::SplitRight,
         Action::SplitDown,
         Action::NewTab,
@@ -238,6 +260,7 @@ impl Action {
         Action::NewPoliticians,
         Action::NewAlerts,
         Action::NewSearch,
+        Action::NewOptions,
         Action::DrawTrendline,
         Action::DrawHorizontal,
         Action::DrawVertical,
@@ -268,6 +291,7 @@ impl Action {
             Action::NextPane => "Next pane".into(),
             Action::PrevPane => "Previous pane".into(),
             Action::ToggleSidebar => "Toggle sidebar".into(),
+            Action::SwapSidebarSide => "Move sidebar to the other side".into(),
             Action::SplitRight => "Split right".into(),
             Action::SplitDown => "Split down".into(),
             Action::NewTab => "New tab".into(),
@@ -285,6 +309,7 @@ impl Action {
             Action::NewPoliticians => "New Politicians pane".into(),
             Action::NewAlerts => "New Alerts pane".into(),
             Action::NewSearch => "New Security search pane".into(),
+            Action::NewOptions => "New Options chain pane".into(),
 
             Action::DrawTrendline => "Draw trendline".into(),
             Action::DrawHorizontal => "Draw horizontal line".into(),
@@ -305,6 +330,7 @@ impl Action {
             A::NextPane
             | A::PrevPane
             | A::ToggleSidebar
+            | A::SwapSidebarSide
             | A::SplitRight
             | A::SplitDown
             | A::NewTab
@@ -338,6 +364,7 @@ impl Action {
             Action::NewPoliticians => "POL",
             Action::NewAlerts => "ALRT",
             Action::NewSearch => "SECF",
+            Action::NewOptions => "OMON",
             _ => return None,
         })
     }
@@ -507,7 +534,9 @@ impl Default for Keymap {
         bind(Action::LogScale, "Alt+L");
         bind(Action::Magnet, "Alt+M");
         // ⌘1…⌘9, ⌘0 open panels; ⌥1…⌥9 switch saved layouts.
-        for (i, a) in Action::ALL.iter().filter(|a| a.panel_spec().is_some()).enumerate() {
+        bind(Action::NewOptions, "Cmd+Shift+O");
+        bind(Action::SwapSidebarSide, "Cmd+Alt+S");
+        for (i, a) in Action::ALL.iter().filter(|a| a.panel_spec().is_some() && **a != Action::NewOptions).enumerate() {
             bind(*a, &format!("Cmd+{}", (i + 1) % 10));
         }
         for (i, a) in Action::ALL.iter().filter(|a| a.layout_slot().is_some()).enumerate() {

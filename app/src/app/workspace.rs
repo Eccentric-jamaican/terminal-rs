@@ -20,11 +20,12 @@ use crate::widgets::{self, Icon};
 use crate::worker::{Request, Worker};
 
 /// Panels offered by the + menus: label and command word.
-pub const PANELS: [(&str, &str); 12] = [
+pub const PANELS: [(&str, &str); 13] = [
     ("Chart", "CHART"),
     ("Watchlist", "WL"),
     ("News", "NEWS"),
     ("Order Book", "BOOK"),
+    ("Options", "OMON"),
     ("World Markets", "WEI"),
     ("Yield Curve", "GC"),
     ("Congress Feed", "CONG"),
@@ -214,6 +215,14 @@ impl TerminalApp {
         })
     }
 
+    /// The focused security if it has listed options (US equity, ETF, index), else AAPL.
+    pub(super) fn optionable_symbol(&self) -> String {
+        use tr_core::AssetClass as C;
+        self.focused_symbol()
+            .filter(|s| matches!(tr_data::security(s).class, C::Equity | C::Etf | C::Index))
+            .unwrap_or_else(|| "AAPL US Equity".into())
+    }
+
     /// Indices of panes on screen: active tabs of the dock plus popped-out windows.
     pub(super) fn visible_panes(&self) -> Vec<usize> {
         let mut ids = self.dock.visible();
@@ -366,6 +375,11 @@ impl TerminalApp {
             PaneKind::OrderBook(b) => {
                 if b.symbol != key {
                     **b = BookPane::new(&key, b.depth, 0.0);
+                }
+            }
+            PaneKind::Options(o) => {
+                if o.symbol != key {
+                    **o = super::OptionsPane::new(&key, o.strikes, o.show_greeks);
                 }
             }
             _ => return false,
@@ -545,6 +559,10 @@ impl TerminalApp {
                     .unwrap_or_else(|| "BTCUSD Curncy".into());
                 PaneKind::OrderBook(Box::new(BookPane::new(&sym, d.book_depth, 0.0)))
             }
+            "OMON" | "OPT" | "OPTIONS" | "CHAIN" => {
+                let sym = given.unwrap_or_else(|| self.optionable_symbol());
+                PaneKind::Options(Box::new(super::OptionsPane::new(&sym, 12, true)))
+            }
             "WEI" | "MARKETS" => PaneKind::Wei,
             "GC" | "CURVE" | "YC" => PaneKind::Curve,
             "CONG" | "FEED" | "CONGRESS" => PaneKind::Feed { filter: FeedFilter::default() },
@@ -611,6 +629,7 @@ impl TerminalApp {
                 })
                 .collect(),
             focus: Some(self.focus),
+            sidebar_side: Some(self.prefs.appearance.sidebar_side),
         }
     }
 
@@ -632,6 +651,12 @@ impl TerminalApp {
             }
         }
         doc.dock.remap(&|id| map.get(&id).copied());
+        if let Some(side) = doc.sidebar_side
+            && side != self.prefs.appearance.sidebar_side
+        {
+            self.prefs.appearance.sidebar_side = side;
+            self.save_prefs();
+        }
         self.dock = doc.dock;
         self.focus = doc.focus.and_then(|f| map.get(&f).copied()).unwrap_or(0);
         self.ensure_focus();

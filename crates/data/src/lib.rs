@@ -137,6 +137,51 @@ impl OrderBook {
     }
 }
 
+/// One listed option.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OptionContract {
+    pub contract: String,
+    pub strike: f64,
+    pub last: Option<f64>,
+    pub change: Option<f64>,
+    pub bid: Option<f64>,
+    pub ask: Option<f64>,
+    pub volume: Option<u64>,
+    pub open_interest: Option<u64>,
+    /// Annualised implied volatility (0.25 = 25%).
+    pub iv: Option<f64>,
+    pub in_the_money: bool,
+}
+
+impl OptionContract {
+    pub fn mid(&self) -> Option<f64> {
+        match (self.bid, self.ask) {
+            (Some(b), Some(a)) if b > 0.0 && a > 0.0 => Some((a + b) / 2.0),
+            _ => self.last,
+        }
+    }
+}
+
+/// Calls and puts for one expiration, plus the other listed expirations.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OptionChain {
+    pub underlying: String,
+    pub spot: f64,
+    /// Continuous dividend yield used for greeks.
+    pub dividend_yield: f64,
+    /// All listed expirations (Unix seconds, ascending).
+    pub expirations: Vec<i64>,
+    /// The expiration shown.
+    pub expiration: i64,
+    pub calls: Vec<OptionContract>,
+    pub puts: Vec<OptionContract>,
+    /// Quote time (Unix seconds).
+    pub ts: i64,
+    pub source: String,
+    /// Synthetic chain (offline sample mode or no source).
+    pub simulated: bool,
+}
+
 /// Live bar updates for one symbol and timeframe: each message is the latest state of
 /// the current (possibly still forming) bar. The feed stops when the receiver is dropped.
 pub type LiveFeed = mpsc::Receiver<Bar>;
@@ -197,6 +242,11 @@ pub trait MarketData: Send + Sync {
     /// Recent headlines for a market key, or general market news for `None`.
     async fn news(&self, _symbol: Option<&str>) -> Result<Vec<NewsItem>> {
         Ok(Vec::new())
+    }
+
+    /// Option chain for one expiration (`None` = nearest).
+    async fn options(&self, symbol: &str, _expiration: Option<i64>) -> Result<OptionChain> {
+        anyhow::bail!("no options data for {symbol}")
     }
 
     /// Top `depth` levels of the order book, where a public book exists.
@@ -296,6 +346,16 @@ impl<P: MarketData> MarketData for Fallback<P> {
         self.primary.news(symbol).await
     }
 
+    async fn options(&self, symbol: &str, expiration: Option<i64>) -> Result<OptionChain> {
+        match self.primary.options(symbol, expiration).await {
+            Ok(c) => Ok(c),
+            Err(e) => {
+                tracing::warn!("{} options {symbol}: {e:#}; simulating", self.name);
+                self.sample.options(symbol, expiration).await
+            }
+        }
+    }
+
     /// Real books where the venue publishes one; otherwise a clearly flagged simulation.
     async fn order_book(&self, symbol: &str, depth: usize) -> Result<OrderBook> {
         match self.primary.order_book(symbol, depth).await {
@@ -377,6 +437,17 @@ mod tests {
         assert!(s.bids[0].0 < 65_000.0 && s.asks[0].0 > 65_000.0);
         assert!(s.bids.windows(2).all(|w| w[0].0 > w[1].0));
         assert_eq!(s, sample::simulated_book("BTCUSD Curncy", 65_000.0, 20, 7));
+        // Simulated option chains: sorted strikes around spot, sane prices, parity-ish.
+        let now = 1_791_800_000;
+        let c = sample::simulated_chain("AAPL US Equity", 230.0, None, now);
+        assert!(c.simulated && c.expirations.len() >= 10 && c.expiration > now);
+        assert!(c.expirations.windows(2).all(|w| w[0] < w[1]));
+        assert!(c.calls.windows(2).all(|w| w[0].strike < w[1].strike));
+        assert!(c.calls.iter().any(|k| k.strike < 230.0) && c.calls.iter().any(|k| k.strike > 230.0));
+        let deep = c.calls.first().unwrap();
+        assert!(deep.in_the_money && deep.mid().unwrap() > 230.0 - deep.strike - 1.0);
+        let later = sample::simulated_chain("AAPL US Equity", 230.0, Some(c.expirations[5]), now);
+        assert_eq!(later.expiration, c.expirations[5]);
     }
 
     struct Broken;

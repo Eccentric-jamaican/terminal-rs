@@ -92,6 +92,15 @@ pub enum PaneSettings {
         group: f64,
     },
     Settings,
+    /// Option chain monitor.
+    Options {
+        symbol: String,
+        /// Strikes shown each side of the money (0 = all).
+        #[serde(default)]
+        strikes: usize,
+        #[serde(default = "yes")]
+        greeks: bool,
+    },
 }
 
 fn yes() -> bool {
@@ -152,6 +161,9 @@ pub struct LayoutDoc {
     pub panes: Vec<SavedPane>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focus: Option<PaneId>,
+    /// Which side the sidebar was on (restored with the layout).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_side: Option<crate::prefs::SidebarSide>,
 }
 
 fn version() -> u32 {
@@ -221,7 +233,14 @@ impl LayoutDoc {
             .map(|(i, settings)| SavedPane { id: i as PaneId + 1, settings, link: None, title: None, window: None })
             .collect();
         let ids: Vec<PaneId> = panes.iter().map(|p| p.id).collect();
-        LayoutDoc { version: FORMAT_VERSION, name: name.into(), dock: Node::preset(layout, &ids), panes, focus: None }
+        LayoutDoc {
+            version: FORMAT_VERSION,
+            name: name.into(),
+            dock: Node::preset(layout, &ids),
+            panes,
+            focus: None,
+            sidebar_side: None,
+        }
     }
 }
 
@@ -422,9 +441,18 @@ mod tests {
             title: None,
             window: Some(WindowGeometry { x: 40.0, y: 60.0, w: 640.0, h: 480.0 }),
         });
+        doc.panes.push(SavedPane {
+            id: 7,
+            settings: PaneSettings::Options { symbol: "AAPL US Equity".into(), strikes: 10, greeks: false },
+            link: Some(Link::Blue),
+            title: None,
+            window: None,
+        });
         doc.dock.insert(1, Zone::Right, 5);
+        doc.dock.insert(5, Zone::Center, 7);
         doc.panes[0].link = Some(Link::Blue);
         doc.focus = Some(5);
+        doc.sidebar_side = Some(crate::prefs::SidebarSide::Right);
         doc
     }
 

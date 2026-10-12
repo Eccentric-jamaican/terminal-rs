@@ -4,6 +4,7 @@
 pub mod bar;
 pub mod catalog;
 pub mod indicators;
+pub mod options;
 pub mod sample;
 pub mod security;
 pub mod timeframe;
