@@ -48,23 +48,35 @@ pub fn rma(values: &[f64], n: usize) -> Vec<f64> {
 }
 
 /// Relative Strength Index with Wilder smoothing (first value at index `n`).
+/// Single pass with no intermediate buffers: on large series the cost is dominated by
+/// first-touch of output memory, so only the output is allocated.
 pub fn rsi(closes: &[f64], n: usize) -> Vec<f64> {
     let mut out = vec![f64::NAN; closes.len()];
     if n == 0 || closes.len() <= n {
         return out;
     }
-    let (gains, losses): (Vec<f64>, Vec<f64>) = closes
-        .windows(2)
-        .map(|w| {
-            let d = w[1] - w[0];
-            (d.max(0.0), (-d).max(0.0))
-        })
-        .unzip();
-    let ag = rma(&gains, n);
-    let al = rma(&losses, n);
-    for i in (n - 1)..gains.len() {
-        let (g, l) = (ag[i], al[i]);
-        out[i + 1] = if l == 0.0 { if g == 0.0 { 50.0 } else { 100.0 } } else { 100.0 - 100.0 / (1.0 + g / l) };
+    let value = |g: f64, l: f64| {
+        if l == 0.0 {
+            if g == 0.0 { 50.0 } else { 100.0 }
+        } else {
+            100.0 - 100.0 / (1.0 + g / l)
+        }
+    };
+    let (mut ag, mut al) = (0.0, 0.0);
+    for i in 1..=n {
+        let d = closes[i] - closes[i - 1];
+        ag += d.max(0.0);
+        al += (-d).max(0.0);
+    }
+    ag /= n as f64;
+    al /= n as f64;
+    out[n] = value(ag, al);
+    let alpha = 1.0 / n as f64;
+    for i in (n + 1)..closes.len() {
+        let d = closes[i] - closes[i - 1];
+        ag = alpha * d.max(0.0) + (1.0 - alpha) * ag;
+        al = alpha * (-d).max(0.0) + (1.0 - alpha) * al;
+        out[i] = value(ag, al);
     }
     out
 }
@@ -76,17 +88,56 @@ pub struct Macd {
     pub histogram: Vec<f64>,
 }
 
-/// MACD line (fast EMA - slow EMA), its signal EMA and histogram.
+/// Streaming EMA seeded with the SMA of its first `n` inputs.
+struct Ema {
+    n: usize,
+    alpha: f64,
+    seen: usize,
+    acc: f64,
+}
+
+impl Ema {
+    fn new(n: usize) -> Self {
+        Self { n, alpha: 2.0 / (n as f64 + 1.0), seen: 0, acc: 0.0 }
+    }
+
+    /// Feed one value; returns the EMA once `n` values have been seen.
+    fn push(&mut self, v: f64) -> Option<f64> {
+        self.seen += 1;
+        if self.seen < self.n {
+            self.acc += v;
+            None
+        } else if self.seen == self.n {
+            self.acc = (self.acc + v) / self.n as f64;
+            Some(self.acc)
+        } else {
+            self.acc = self.alpha * v + (1.0 - self.alpha) * self.acc;
+            Some(self.acc)
+        }
+    }
+}
+
+/// MACD line (fast EMA - slow EMA), its signal EMA and histogram, in one pass.
 pub fn macd(closes: &[f64], fast: usize, slow: usize, signal: usize) -> Macd {
-    let f = ema(closes, fast);
-    let s = ema(closes, slow);
-    let line: Vec<f64> = f.iter().zip(&s).map(|(a, b)| a - b).collect();
-    // The signal EMA starts once the MACD line itself is defined.
-    let start = line.iter().position(|v| !v.is_nan()).unwrap_or(line.len());
-    let mut sig = vec![f64::NAN; line.len()];
-    let tail = ema(&line[start..], signal);
-    sig[start..].copy_from_slice(&tail);
-    let histogram = line.iter().zip(&sig).map(|(a, b)| a - b).collect();
+    let len = closes.len();
+    let mut line = vec![f64::NAN; len];
+    let mut sig = vec![f64::NAN; len];
+    let mut histogram = vec![f64::NAN; len];
+    if fast == 0 || slow == 0 || signal == 0 {
+        return Macd { macd: line, signal: sig, histogram };
+    }
+    let (mut ef, mut es, mut eg) = (Ema::new(fast), Ema::new(slow), Ema::new(signal));
+    for (i, &c) in closes.iter().enumerate() {
+        let (f, s) = (ef.push(c), es.push(c));
+        let (Some(f), Some(s)) = (f, s) else { continue };
+        let m = f - s;
+        line[i] = m;
+        // The signal EMA starts once the MACD line itself is defined.
+        if let Some(g) = eg.push(m) {
+            sig[i] = g;
+            histogram[i] = m - g;
+        }
+    }
     Macd { macd: line, signal: sig, histogram }
 }
 
