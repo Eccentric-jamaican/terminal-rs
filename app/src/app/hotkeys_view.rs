@@ -288,6 +288,15 @@ impl TerminalApp {
                     (&["LINK BLUE", "LINK OFF"], "Colour link group: one security drives linked panes"),
                     (&["TITLE Desk", "CLOSE"], "Rename or close the focused tab"),
                     (&["SIDEBAR RIGHT", "SIDEBAR LEFT", "SIDEBAR"], "Sidebar side, or show/hide (also the View menu)"),
+                    (
+                        &["THEME NORD", "THEME NEXT", "THEME LIST"],
+                        "Switch theme (⌘⌥T cycles; THEME SYSTEM follows the OS)",
+                    ),
+                    (
+                        &["THEME EDIT", "THEME COMPACT", "THEME MONO"],
+                        "Theme editor, or adjust the active theme's density and font",
+                    ),
+                    (&["LAYOUT THEME ON"], "Save the current theme with each layout"),
                 ],
             );
             para(

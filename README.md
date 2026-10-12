@@ -92,19 +92,31 @@ systems**.
     sidebar list, ⌥1…⌥9); the active layout autosaves and is restored on launch. Each layout is
     a JSON file in `~/Library/Application Support/terminal-rs/layouts` (`$XDG_DATA_HOME` on
     Linux) and can be imported or exported (`LAYOUT EXPORT`/`IMPORT`, or Settings › Layouts).
-  - **Preferences** (`PREFS`, persisted in `prefs.json`): light/dark/system theme, accent, up/down
-    and highlight colours, interface and number fonts, text size and density (compact, regular,
-    comfortable); every hotkey is rebindable from a native shortcut table (click a binding, press the new
+  - **Preferences** (`PREFS`, persisted in `prefs.json`): theme, sidebar side and vibrancy;
+    every hotkey is rebindable from a native shortcut table (click a binding, press the new
     keys) in Settings and Help, and ⌘1…⌘0 open a new chart, watchlist, news, order book, world
     markets, yield curve, Congress, politicians, alerts or search pane; defaults for new charts and order books. Per-pane
     settings (chart type, indicators, drawings, filters, depth, link, tab title) save with the layout.
+  - **Themes**: built-in Terminal Dark, Terminal Light, Bloomberg (amber on black, monospace,
+    compact), High Contrast, Solarized Dark/Light, Nord and Monokai. A theme sets every colour
+    (backgrounds, panels, text, accent, up/down, chart candles, grid, series), the interface and
+    number fonts and size, and density (compact, regular, comfortable). Pick one from the gallery
+    in Settings › Appearance, the toolbar's right-click View menu, `THEME <name>` (prefix match),
+    `THEME NEXT|PREV|LIST|SYSTEM` or ⌘⌥T to cycle; System follows the OS with a chosen dark and
+    light theme. Settings › Themes is a live editor: tweak any colour, font or density and see it
+    immediately; editing a built-in makes a copy (built-ins stay read-only); duplicate, rename,
+    delete and import or export as TOML or JSON. Custom themes are TOML files in the `themes`
+    folder next to `layouts`; a partial file inherits everything else from Terminal Dark or Light.
+    `THEME COMPACT|REGULAR|COMFORTABLE|MONO|SF` adjust the active theme, and `LAYOUT THEME ON`
+    saves the theme with each layout.
   - **Options** (`AAPL OMON`, ⌘⇧O): full chains from Yahoo for US equities, ETFs and indices
     (SPX via ^SPX): every expiration, calls and puts by strike with bid/ask/last, change,
     volume, open interest and IV, plus Black-Scholes greeks (Δ, Γ, Θ/day, vega) computed from
     each contract's IV, the dividend yield and the 3-month T-bill rate; in-the-money shading,
     spot marker, ±10/±20/all strikes; offline mode shows a flagged simulated chain.
   - **Sidebar on either side**: View menu, `SIDEBAR LEFT|RIGHT`, ⌘⌥S or Settings; saved in
-    prefs and with each layout.
+    prefs and with each layout. The toolbar's sidebar toggle moves with it (mirrored on the right);
+    right-click it for the View menu (sidebar, theme, density, frame timing, settings).
   - **News** (Yahoo headlines; CoinDesk for crypto) and **order book** depth (live Binance book,
     Coinbase fallback; markets without a free public book show a clearly marked simulation).
 - **Native macOS feel** while keeping Bloomberg density and the command line: transparent title
@@ -130,7 +142,7 @@ Data lives in `~/Library/Application Support/terminal-rs` (macOS) or
 current and previous year (a few minutes; it runs in the background while you work).
 `cargo run -p tr-congress --example ingest -- congress.sqlite3` runs one ingest from the CLI.
 
-Appearance: `TR_THEME=light|dark` overrides the system appearance, `TR_MSAA=1|2|4|8` sets
+Appearance: `TR_THEME=light|dark|<theme name>` overrides the saved theme, `TR_MSAA=1|2|4|8` sets
 chart anti-aliasing (default 4 on macOS), `TR_VIBRANCY=0` disables the translucent sidebar, and
 ⌃⌘S (Ctrl+Shift+S elsewhere) toggles the sidebar. `scripts/bundle-macos.sh` builds a retina-capable
 `terminal-rs.app`; `scripts/check-macos-cross.sh` compiles and lints the whole workspace for
@@ -152,7 +164,8 @@ Press **F1** (or type `HELP`) for the full command and hotkey list. Highlights:
 | F1–F6 · Tab · F12 | help, CONG, POL, ALRT, WL, SYNC · next pane · frame-time readout |
 | `NEW BOOK` · `SPLIT DOWN NEWS` · `POP` · `LINK GREEN` · `TITLE Desk` | add, split, pop out, link, rename panes |
 | `LAYOUT SAVE Macro` · `LAYOUT Macro` · `LAYOUT RENAME Rates` · `LAYOUT DUP` · `LAYOUT DEL` · `LAYOUT EXPORT` | saved layouts |
-| `AAPL CN` · `BTCUSD CRNCY OB` · `PREFS` · `THEME LIGHT COMPACT` | news · order book · settings · theme |
+| `AAPL CN` · `BTCUSD CRNCY OB` · `PREFS` | news · order book · settings |
+| `THEME BLOOMBERG` · `THEME NEXT` (⌘⌥T) · `THEME EDIT` · `THEME COMPACT` · `LAYOUT THEME ON` | themes |
 | right-click chart / watchlist / feed row | context menu (chart type, indicators, draw, add to watchlist, who traded it) |
 
 ## Architecture
@@ -162,6 +175,7 @@ app/            eframe shell: command line, docked panes, chart widget, panels
   dock.rs       docking tree (splits + tab groups): insert/move/remove, layout, resize, presets
   layouts.rs    saved layout documents (JSON) and the layouts folder store
   prefs.rs      appearance, keymap and panel defaults (prefs.json)
+  themes.rs     theme model, built-in themes, TOML/JSON theme files and the themes folder
   app/          workspace (drag and drop, pop-out windows, link groups), panels, settings, chrome
   worker.rs     tokio runtime: all network, SQLite, pyramid and indicator work (UI never blocks)
 crates/core     Bar/Series, timeframes, market keys + security catalog, indicators, sample data

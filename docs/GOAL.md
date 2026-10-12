@@ -19,3 +19,12 @@ Pure Rust, fully native, no web frontend: wgpu for GPU chart rendering plus a fa
 
 ## Quality
 Tests for the parsers and indicators, frame-time benchmarks, and a README noting it was built from reverse-engineering research. Make Conventional Commits as you go.
+
+## Progress
+- [x] Command line, docking workspace (splits, tabs, drag and drop, pop-outs), saved layouts, link groups, rebindable hotkeys.
+- [x] wgpu charts: candles/bars/line/area, 1m–1M, SMA/EMA/VWAP/RSI/MACD/Bollinger, drawings, compare, log scale.
+- [x] Pluggable data providers (Yahoo, Binance/Coinbase, sample mode); multi-asset (equities, FX, crypto, rates, commodities, indices).
+- [x] Congress ingest from Senate eFD and House Clerk (PDF/XML), feed, politician profiles, per-ticker panel, chart markers with hover card, tracking alerts, freshness indicator.
+- [x] Native macOS look (unified toolbar, vibrancy sidebar on either side, SF fonts), options chains (OMON) with greeks.
+- [x] Theme system: built-in themes (Terminal Dark/Light, Bloomberg, High Contrast, Solarized, Nord, Monokai), live editor in Settings, custom themes as TOML files with TOML/JSON import/export, `THEME` command, ⌘⌥T cycling, optional theme per layout.
+- [x] Tests for parsers, indicators, layouts, prefs and themes; frame-time benchmarks; README.

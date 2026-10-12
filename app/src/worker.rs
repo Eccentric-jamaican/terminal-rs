@@ -754,7 +754,7 @@ mod tests {
             &bars,
             Timeframe::D1,
             &[IndicatorSpec::Bollinger(20, 2.0), IndicatorSpec::Macd(12, 26, 9), IndicatorSpec::Vwap],
-            &theme::Palette::light(theme::DEFAULT_ACCENT),
+            &crate::themes::terminal_light().palette(theme::DEFAULT_ACCENT),
         );
         assert_eq!(built[0].overlays.len(), 3);
         assert_eq!(built[1].overlays[0].1.kind, LineKind::Hist);

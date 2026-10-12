@@ -78,20 +78,27 @@ impl TerminalApp {
         let cy = rect.center().y;
         let mut x = rect.left() + left_inset + 8.0;
 
-        // Sidebar toggle.
-        let mut tb = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(pos2(x, cy - 11.0), vec2(26.0, 22.0))));
-        if widgets::icon_button(&mut tb, Icon::Sidebar, "Toggle Sidebar", false).clicked() {
+        // The sidebar toggle sits on the sidebar's side, its glyph pointing at it.
+        // Right-click it for the View options (sidebar side, theme, density).
+        let on_right = self.prefs.appearance.sidebar_side == crate::prefs::SidebarSide::Right;
+        let mut right = rect.right() - 10.0;
+        let toggle_r = if on_right {
+            right -= 26.0;
+            let r = Rect::from_min_size(pos2(right, cy - 11.0), vec2(26.0, 22.0));
+            right -= 8.0;
+            r
+        } else {
+            let r = Rect::from_min_size(pos2(x, cy - 11.0), vec2(26.0, 22.0));
+            x += 32.0;
+            r
+        };
+        let mut tb = ui.new_child(UiBuilder::new().max_rect(toggle_r));
+        let icon = if on_right { Icon::SidebarRight } else { Icon::Sidebar };
+        let resp = widgets::icon_button(&mut tb, icon, "Toggle Sidebar (right-click for View options)", false);
+        if resp.clicked() {
             self.sidebar_open = !self.sidebar_open;
         }
-        x += 30.0;
-
-        // View menu.
-        let view_r = Rect::from_min_size(pos2(x, cy - 10.0), vec2(42.0, 20.0));
-        let mut vb = ui.new_child(UiBuilder::new().max_rect(view_r));
-        let resp =
-            vb.add(egui::Button::new(RichText::new("View").font(ui_font(12.0))).frame(false).min_size(view_r.size()));
-        egui::Popup::menu(&resp).show(|ui| self.view_menu(ui));
-        x = view_r.right() + 8.0;
+        resp.context_menu(|ui| self.view_menu(ui));
 
         // Data source chip (the window title itself is redundant in a compact toolbar).
         let live = !self.provider.eq_ignore_ascii_case("sample");
@@ -107,7 +114,6 @@ impl TerminalApp {
         let now = chrono::Local::now();
         let clock = p.layout_no_wrap(now.format("%a %d %b %H:%M:%S").to_string(), mono(11.5), text());
         let cw = clock.size().x;
-        let mut right = rect.right() - 10.0;
         let clock_r = Rect::from_min_size(pos2(right - cw, cy - clock.size().y / 2.0), clock.size());
         p.galley(clock_r.min, clock, text());
         ui.interact(clock_r, Id::new("clock"), Sense::hover())
@@ -165,7 +171,7 @@ impl TerminalApp {
 
     /// The View menu: sidebar visibility and side, theme, density, readouts.
     fn view_menu(&mut self, ui: &mut Ui) {
-        use crate::prefs::{Action as A, Density, SidebarSide, ThemeMode};
+        use crate::prefs::{Action as A, Density, SidebarSide};
         ui.set_min_width(220.0);
         let key = |a: A| self.prefs.hotkeys.chord(a).map(|c| c.display()).unwrap_or_default();
         let (k_sb, k_swap, k_perf) = (key(A::ToggleSidebar), key(A::SwapSidebarSide), key(A::FrameTiming));
@@ -193,20 +199,27 @@ impl TerminalApp {
             ui.close();
         }
         ui.separator();
-        ui.menu_button("Appearance", |ui| {
-            for (m, label) in [(ThemeMode::System, "System"), (ThemeMode::Light, "Light"), (ThemeMode::Dark, "Dark")] {
-                if ui.radio(a.mode == m, label).clicked() {
-                    a.mode = m;
-                    changed = true;
+        let choices = self.theme_choices();
+        let current = self.prefs.appearance.theme.clone();
+        let mut pick = None;
+        ui.menu_button("Theme", |ui| {
+            for name in &choices {
+                if ui.radio(name.eq_ignore_ascii_case(&current), name).clicked() {
+                    pick = Some(name.clone());
                     ui.close();
                 }
             }
+            ui.separator();
+            if ui.button("Edit Themes…").clicked() {
+                pick = Some("EDIT".into());
+                ui.close();
+            }
         });
+        let mut density = None;
         ui.menu_button("Density", |ui| {
             for d in Density::ALL {
-                if ui.radio(a.density == d, d.label()).clicked() {
-                    a.density = d;
-                    changed = true;
+                if ui.button(d.label()).clicked() {
+                    density = Some(d);
                     ui.close();
                 }
             }
@@ -226,6 +239,17 @@ impl TerminalApp {
         }
         if changed {
             self.save_prefs();
+        }
+        let system = self.system_theme;
+        match pick.as_deref() {
+            Some("EDIT") => self.theme_command("EDIT", system),
+            Some(name) => {
+                self.select_theme(name);
+            }
+            None => {}
+        }
+        if let Some(d) = density {
+            self.theme_command(&d.label().to_ascii_uppercase(), system);
         }
     }
 

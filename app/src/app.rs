@@ -9,6 +9,7 @@ mod hotkeys_view;
 mod options_view;
 mod panels;
 mod settings_view;
+mod theming;
 mod workspace;
 
 use std::collections::HashMap;
@@ -399,7 +400,21 @@ pub struct TerminalApp {
     renaming_layout: Option<(String, String)>,
 
     prefs: Prefs,
-    applied_appearance: Option<prefs::Appearance>,
+    /// Built-in and custom themes, and the theme last applied to egui.
+    themes: Vec<crate::themes::Theme>,
+    theme_store: crate::themes::ThemeStore,
+    applied_theme: Option<crate::themes::Theme>,
+    /// Theme selected in the editor.
+    editing_theme: String,
+    /// Custom themes edited but not yet written (saved once editing pauses).
+    dirty_themes: Vec<String>,
+    themes_changed_at: Option<Instant>,
+    renaming_theme: Option<(String, String)>,
+    theme_io: String,
+    /// The OS appearance, for System theme resolution in commands.
+    system_theme: Option<egui::Theme>,
+    /// The active layout carries its theme.
+    layout_theme: bool,
     rebinding: Option<prefs::Action>,
     hotkey_filter: String,
     settings_tab: SettingsTab,
@@ -486,12 +501,26 @@ impl TerminalApp {
         let system_accent =
             tr_macos::accent_color().map_or(theme::DEFAULT_ACCENT, |[r, g, b]| Color32::from_rgb(r, g, b));
         let mut prefs = Prefs::load(&prefs_path());
-        match std::env::var("TR_THEME").map(|v| v.to_ascii_lowercase()).as_deref() {
-            Ok("light") => prefs.appearance.mode = prefs::ThemeMode::Light,
-            Ok("dark") => prefs.appearance.mode = prefs::ThemeMode::Dark,
-            _ => {}
+        let theme_store = crate::themes::ThemeStore::new(data_dir().join("themes"));
+        let mut themes = theme_store.load_all();
+        // Appearance overrides from older versions become a custom theme file.
+        if let Some(mut t) = prefs.migrated_theme.take() {
+            t.name = crate::themes::unique_name(&themes, &t.name);
+            prefs.appearance.theme = t.name.clone();
+            match theme_store.save(&t) {
+                Ok(path) => t.source = Some(path),
+                Err(e) => tracing::warn!("saving migrated theme: {e:#}"),
+            }
+            themes.push(t);
+            let _ = prefs.save(&prefs_path());
         }
-        theme::configure(ctx, &prefs.appearance, system_accent);
+        if let Ok(v) = std::env::var("TR_THEME") {
+            prefs.appearance.theme = match v.to_ascii_lowercase().as_str() {
+                "light" => prefs.appearance.light_theme.clone(),
+                "dark" => prefs.appearance.dark_theme.clone(),
+                _ => crate::themes::find(&themes, &v).map_or(prefs.appearance.theme.clone(), |t| t.name.clone()),
+            };
+        }
         let settings: Option<Settings> =
             std::fs::read(settings_path()).ok().and_then(|b| serde_json::from_slice(&b).ok());
         let mut app = Self {
@@ -510,7 +539,16 @@ impl TerminalApp {
             layout_names: Vec::new(),
             last_saved: Vec::new(),
             renaming_layout: None,
-            applied_appearance: Some(prefs.appearance.clone()),
+            editing_theme: prefs.appearance.theme.clone(),
+            themes,
+            theme_store,
+            applied_theme: None,
+            dirty_themes: Vec::new(),
+            themes_changed_at: None,
+            renaming_theme: None,
+            theme_io: String::new(),
+            system_theme: ctx.system_theme(),
+            layout_theme: false,
             prefs,
             rebinding: None,
             hotkey_filter: String::new(),
@@ -768,21 +806,8 @@ impl TerminalApp {
                 self.save_prefs();
             }
             Function::Theme(t) => {
-                let a = &mut self.prefs.appearance;
-                for w in t.split_whitespace() {
-                    match w {
-                        "LIGHT" => a.mode = prefs::ThemeMode::Light,
-                        "DARK" => a.mode = prefs::ThemeMode::Dark,
-                        "SYSTEM" | "AUTO" => a.mode = prefs::ThemeMode::System,
-                        "COMPACT" => a.density = prefs::Density::Compact,
-                        "REGULAR" => a.density = prefs::Density::Regular,
-                        "COMFORTABLE" => a.density = prefs::Density::Comfortable,
-                        "MONO" => a.ui_font = prefs::UiFont::Monospace,
-                        "SF" | "SANS" => a.ui_font = prefs::UiFont::System,
-                        other => self.status = format!("THEME: unknown option {other}"),
-                    }
-                }
-                self.save_prefs();
+                let system = self.system_theme;
+                self.theme_command(&t, system);
             }
             Function::Title(t) => {
                 let focus = self.focus;
@@ -1141,6 +1166,7 @@ impl TerminalApp {
             A::NextPane => self.cycle_focus(1),
             A::PrevPane => self.cycle_focus(-1),
             A::ToggleSidebar => self.sidebar_open = !self.sidebar_open,
+            A::NextTheme => self.cycle_theme(1),
             A::SwapSidebarSide => self.apply(Function::Sidebar("SWAP".into())),
             A::SplitRight => self.apply(Function::Split { down: false, panel: String::new() }),
             A::SplitDown => self.apply(Function::Split { down: true, panel: String::new() }),
@@ -1226,6 +1252,7 @@ impl TerminalApp {
             self.worker.send(Request::Latest { limit: 2_000 });
             self.last_feed = Some(Instant::now());
         }
+        self.save_dirty_themes(false);
         if self.last_save.elapsed() > Duration::from_secs(10) {
             self.autosave();
             self.last_save = Instant::now();
@@ -1235,6 +1262,7 @@ impl TerminalApp {
 
     /// Save the active layout (only when it changed) and app settings.
     fn autosave(&mut self) {
+        self.save_dirty_themes(true);
         let json = self.current_doc().to_json();
         if json != self.last_saved {
             self.save_layout();
@@ -1307,11 +1335,13 @@ impl eframe::App for TerminalApp {
             }
             self.last_accent_poll = Some(Instant::now());
         }
-        if self.applied_appearance.as_ref() != Some(&self.prefs.appearance) {
-            theme::configure(&ctx, &self.prefs.appearance, self.system_accent);
-            self.applied_appearance = Some(self.prefs.appearance.clone());
+        self.system_theme = ctx.system_theme();
+        let ti = self.active_theme_index(&ctx);
+        if self.applied_theme.as_ref() != Some(&self.themes[ti]) {
+            theme::configure(&ctx, &self.themes[ti], self.system_accent);
+            self.applied_theme = Some(self.themes[ti].clone());
         }
-        theme::refresh(&ctx, &self.prefs.appearance, self.system_accent);
+        theme::refresh(&ctx, &self.themes[ti], self.system_accent);
         self.drain();
         self.periodic();
 

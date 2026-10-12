@@ -123,25 +123,39 @@ pub type Rgb = [u8; 3];
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Appearance {
-    pub mode: ThemeMode,
-    /// `None` follows the system accent colour.
-    pub accent: Option<Rgb>,
-    pub up: Option<Rgb>,
-    pub down: Option<Rgb>,
-    /// Tickers, the command line and other "Bloomberg amber" highlights.
-    pub highlight: Option<Rgb>,
-    pub ui_font: UiFont,
-    pub mono_font: MonoFont,
-    /// Global text size multiplier.
-    pub font_scale: f32,
-    pub density: Density,
+    /// Active theme name, or `System` to follow the OS with `dark_theme`/`light_theme`.
+    pub theme: String,
+    pub dark_theme: String,
+    pub light_theme: String,
     pub vibrancy: bool,
     pub sidebar_side: SidebarSide,
+    // Pre-theme (v2) appearance overrides, read only to migrate them into a theme.
+    #[serde(skip_serializing)]
+    pub mode: ThemeMode,
+    #[serde(skip_serializing)]
+    pub accent: Option<Rgb>,
+    #[serde(skip_serializing)]
+    pub up: Option<Rgb>,
+    #[serde(skip_serializing)]
+    pub down: Option<Rgb>,
+    #[serde(skip_serializing)]
+    pub highlight: Option<Rgb>,
+    #[serde(skip_serializing)]
+    pub ui_font: UiFont,
+    #[serde(skip_serializing)]
+    pub mono_font: MonoFont,
+    #[serde(skip_serializing)]
+    pub font_scale: f32,
+    #[serde(skip_serializing)]
+    pub density: Density,
 }
 
 impl Default for Appearance {
     fn default() -> Self {
         Self {
+            theme: crate::themes::SYSTEM.into(),
+            dark_theme: "Terminal Dark".into(),
+            light_theme: "Terminal Light".into(),
             mode: ThemeMode::System,
             accent: None,
             up: None,
@@ -193,6 +207,7 @@ pub enum Action {
     NextPane,
     PrevPane,
     ToggleSidebar,
+    NextTheme,
     SwapSidebarSide,
     SplitRight,
     SplitDown,
@@ -231,7 +246,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 45] = [
+    pub const ALL: [Action; 46] = [
         Action::Help,
         Action::Congress,
         Action::Politicians,
@@ -242,6 +257,7 @@ impl Action {
         Action::NextPane,
         Action::PrevPane,
         Action::ToggleSidebar,
+        Action::NextTheme,
         Action::SwapSidebarSide,
         Action::SplitRight,
         Action::SplitDown,
@@ -291,6 +307,7 @@ impl Action {
             Action::NextPane => "Next pane".into(),
             Action::PrevPane => "Previous pane".into(),
             Action::ToggleSidebar => "Toggle sidebar".into(),
+            Action::NextTheme => "Cycle to the next theme".into(),
             Action::SwapSidebarSide => "Move sidebar to the other side".into(),
             Action::SplitRight => "Split right".into(),
             Action::SplitDown => "Split down".into(),
@@ -330,6 +347,7 @@ impl Action {
             A::NextPane
             | A::PrevPane
             | A::ToggleSidebar
+            | A::NextTheme
             | A::SwapSidebarSide
             | A::SplitRight
             | A::SplitDown
@@ -536,6 +554,7 @@ impl Default for Keymap {
         // ⌘1…⌘9, ⌘0 open panels; ⌥1…⌥9 switch saved layouts.
         bind(Action::NewOptions, "Cmd+Shift+O");
         bind(Action::SwapSidebarSide, "Cmd+Alt+S");
+        bind(Action::NextTheme, "Cmd+Alt+T");
         for (i, a) in Action::ALL.iter().filter(|a| a.panel_spec().is_some() && **a != Action::NewOptions).enumerate() {
             bind(*a, &format!("Cmd+{}", (i + 1) % 10));
         }
@@ -579,7 +598,7 @@ impl Keymap {
     }
 }
 
-pub const PREFS_VERSION: u32 = 2;
+pub const PREFS_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -590,6 +609,9 @@ pub struct Prefs {
     pub appearance: Appearance,
     pub hotkeys: Keymap,
     pub panels: PanelDefaults,
+    /// A custom theme built from v2 appearance overrides, for the app to save.
+    #[serde(skip)]
+    pub migrated_theme: Option<crate::themes::Theme>,
 }
 
 impl Default for Prefs {
@@ -599,6 +621,7 @@ impl Default for Prefs {
             appearance: Appearance::default(),
             hotkeys: Keymap::default(),
             panels: PanelDefaults::default(),
+            migrated_theme: None,
         }
     }
 }
@@ -624,7 +647,56 @@ impl Prefs {
                 }
             }
         }
+        if self.version < 3 {
+            self.migrated_theme = self.migrate_appearance();
+        }
         self.version = PREFS_VERSION;
+    }
+
+    /// v3 moved colours, fonts and density into themes. Plain light/dark choices map to
+    /// the built-in themes; any overrides become a custom "My Theme" on that base.
+    fn migrate_appearance(&mut self) -> Option<crate::themes::Theme> {
+        use crate::themes::{Hex, terminal_dark, terminal_light};
+        let a = &mut self.appearance;
+        let overrides = a.accent.is_some()
+            || a.up.is_some()
+            || a.down.is_some()
+            || a.highlight.is_some()
+            || a.ui_font != UiFont::System
+            || a.mono_font != MonoFont::System
+            || (a.font_scale - 1.0).abs() > 1e-3
+            || a.density != Density::Regular;
+        let base = if a.mode == ThemeMode::Light { terminal_light() } else { terminal_dark() };
+        if !overrides {
+            a.theme = match a.mode {
+                ThemeMode::System => crate::themes::SYSTEM.into(),
+                _ => base.name,
+            };
+            return None;
+        }
+        let rgb = |c: Rgb| Hex::rgb(c[0], c[1], c[2]);
+        let mut t = base;
+        t.name = "My Theme".into();
+        t.builtin = false;
+        t.colors.accent = a.accent.map(rgb).or(t.colors.accent);
+        if let Some(c) = a.up {
+            t.colors.up = rgb(c);
+            t.colors.candle_up = rgb(c);
+        }
+        if let Some(c) = a.down {
+            t.colors.down = rgb(c);
+            t.colors.candle_down = rgb(c);
+        }
+        if let Some(c) = a.highlight {
+            t.colors.highlight = rgb(c);
+            t.colors.highlight_dim = rgb(c.map(|x| (x as f32 * 0.66) as u8));
+        }
+        t.fonts.ui = a.ui_font;
+        t.fonts.mono = a.mono_font;
+        t.fonts.scale = a.font_scale.clamp(0.7, 1.6);
+        t.density = a.density;
+        a.theme = t.name.clone();
+        Some(t)
     }
 
     pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
@@ -689,9 +761,9 @@ mod tests {
     #[test]
     fn prefs_json_round_trip_and_partial_files() {
         let mut p = Prefs::default();
-        p.appearance.mode = ThemeMode::Light;
-        p.appearance.accent = Some([255, 45, 85]);
-        p.appearance.density = Density::Compact;
+        p.appearance.theme = "Nord".into();
+        p.appearance.light_theme = "Solarized Light".into();
+        p.appearance.sidebar_side = SidebarSide::Right;
         p.panels.chart_type = ChartType::Line;
         p.hotkeys.bind(Action::Help, Chord::parse("Cmd+Shift+H").unwrap());
         let json = serde_json::to_string_pretty(&p).unwrap();
@@ -699,9 +771,9 @@ mod tests {
         let back: Prefs = serde_json::from_str(&json).unwrap();
         assert_eq!(back, p);
         // Older or hand-written files with only some fields still load.
-        let partial: Prefs = serde_json::from_str(r#"{"appearance":{"density":"Comfortable"}}"#).unwrap();
-        assert_eq!(partial.appearance.density, Density::Comfortable);
-        assert_eq!(partial.appearance.font_scale, 1.0);
+        let partial: Prefs = serde_json::from_str(r#"{"appearance":{"theme":"Monokai"}}"#).unwrap();
+        assert_eq!(partial.appearance.theme, "Monokai");
+        assert_eq!(partial.appearance.dark_theme, "Terminal Dark");
         assert_eq!(partial.panels, PanelDefaults::default());
         let dir = std::env::temp_dir().join(format!("tr-prefs-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -729,5 +801,35 @@ mod tests {
         assert_eq!(p.hotkeys.action_for(Key::Num1, Modifiers::COMMAND), Some(Action::NewChart));
         assert_eq!(p.hotkeys.action_for(Key::Num1, Modifiers::ALT), Some(Action::Layout1));
         assert_eq!(p.hotkeys.action_for(Key::F9, Modifiers::NONE), Some(Action::Layout9), "customised binding kept");
+    }
+
+    #[test]
+    fn v2_appearance_migrates_into_themes() {
+        // Defaults follow the system.
+        let mut p: Prefs = serde_json::from_str(r#"{"version":2,"appearance":{"mode":"System"}}"#).unwrap();
+        p.migrate();
+        assert_eq!(p.appearance.theme, "System");
+        assert!(p.migrated_theme.is_none());
+        // A plain light choice maps to the built-in light theme.
+        let mut p: Prefs = serde_json::from_str(r#"{"version":2,"appearance":{"mode":"Light"}}"#).unwrap();
+        p.migrate();
+        assert_eq!(p.appearance.theme, "Terminal Light");
+        // Overrides become a custom theme on the chosen base.
+        let mut p: Prefs = serde_json::from_str(
+            r#"{"version":2,"appearance":{"mode":"Dark","up":[1,2,3],"highlight":[200,100,0],"density":"Compact","font_scale":1.2}}"#,
+        )
+        .unwrap();
+        p.migrate();
+        let t = p.migrated_theme.clone().unwrap();
+        assert_eq!(p.appearance.theme, "My Theme");
+        assert!(t.dark && !t.builtin);
+        assert_eq!(t.colors.up, crate::themes::Hex::rgb(1, 2, 3));
+        assert_eq!(t.colors.candle_up, t.colors.up);
+        assert_eq!(t.colors.highlight, crate::themes::Hex::rgb(200, 100, 0));
+        assert_eq!(t.density, Density::Compact);
+        assert!((t.fonts.scale - 1.2).abs() < 1e-6);
+        // Legacy fields are no longer written.
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(!json.contains("font_scale") && json.contains("\"theme\":\"My Theme\""), "{json}");
     }
 }

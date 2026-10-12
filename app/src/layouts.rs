@@ -164,6 +164,9 @@ pub struct LayoutDoc {
     /// Which side the sidebar was on (restored with the layout).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar_side: Option<crate::prefs::SidebarSide>,
+    /// Theme to switch to with this layout (only when the layout carries its theme).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
 }
 
 fn version() -> u32 {
@@ -240,6 +243,7 @@ impl LayoutDoc {
             panes,
             focus: None,
             sidebar_side: None,
+            theme: None,
         }
     }
 }
@@ -453,6 +457,7 @@ mod tests {
         doc.panes[0].link = Some(Link::Blue);
         doc.focus = Some(5);
         doc.sidebar_side = Some(crate::prefs::SidebarSide::Right);
+        doc.theme = Some("Nord".into());
         doc
     }
 

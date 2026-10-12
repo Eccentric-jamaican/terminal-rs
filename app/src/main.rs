@@ -12,6 +12,7 @@ mod layouts;
 mod markets_view;
 mod prefs;
 mod theme;
+mod themes;
 mod widgets;
 mod worker;
 

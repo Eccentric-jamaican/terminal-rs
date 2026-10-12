@@ -630,6 +630,7 @@ impl TerminalApp {
                 .collect(),
             focus: Some(self.focus),
             sidebar_side: Some(self.prefs.appearance.sidebar_side),
+            theme: self.layout_theme.then(|| self.prefs.appearance.theme.clone()),
         }
     }
 
@@ -651,6 +652,13 @@ impl TerminalApp {
             }
         }
         doc.dock.remap(&|id| map.get(&id).copied());
+        self.layout_theme = doc.theme.is_some();
+        if let Some(name) = doc.theme.as_deref()
+            && !name.eq_ignore_ascii_case(&self.prefs.appearance.theme)
+            && (name.eq_ignore_ascii_case(crate::themes::SYSTEM) || crate::themes::find(&self.themes, name).is_some())
+        {
+            self.select_theme(name);
+        }
         if let Some(side) = doc.sidebar_side
             && side != self.prefs.appearance.sidebar_side
         {
@@ -728,6 +736,17 @@ impl TerminalApp {
             "EXPORT" => LayoutOp::Export(self.layout_name.clone(), (words.len() > 1).then(|| expand_home(&rest(1)))),
             "IMPORT" if words.len() > 1 => LayoutOp::Import(expand_home(&rest(1))),
             "FOLDER" | "DIR" => LayoutOp::OpenFolder,
+            "THEME" => {
+                self.layout_theme =
+                    !matches!(words.get(1).map(|w| w.to_ascii_uppercase()).as_deref(), Some("OFF" | "NO"));
+                self.save_layout();
+                self.status = if self.layout_theme {
+                    format!("Layout {:?} now switches to theme {:?}", self.layout_name, self.prefs.appearance.theme)
+                } else {
+                    format!("Layout {:?} no longer changes the theme", self.layout_name)
+                };
+                return;
+            }
             _ => LayoutOp::Switch(arg.trim().to_string()),
         };
         self.layout_op(op);

@@ -7,7 +7,7 @@
 
 use std::cell::Cell;
 
-use crate::prefs::{Appearance, MonoFont, ThemeMode, UiFont};
+use crate::prefs::{MonoFont, UiFont};
 use egui::{Color32, FontData, FontDefinitions, FontFamily, FontId, Shadow, Stroke, TextStyle, Theme, Visuals};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -28,6 +28,8 @@ pub struct Palette {
     pub amber_dim: Color32,
     pub up: Color32,
     pub down: Color32,
+    pub candle_up: Color32,
+    pub candle_down: Color32,
     pub cyan: Color32,
     pub control: Color32,
     pub control_hover: Color32,
@@ -36,89 +38,9 @@ pub struct Palette {
 }
 
 impl Palette {
+    /// The built-in Terminal Dark palette.
     pub fn dark(accent: Color32) -> Self {
-        Self {
-            dark: true,
-            window: Color32::from_rgb(30, 30, 32),
-            sidebar: Color32::from_rgba_unmultiplied(28, 28, 30, 150),
-            card: Color32::from_rgb(12, 12, 13),
-            card_header: Color32::from_rgb(28, 28, 30),
-            border: Color32::from_rgba_unmultiplied(255, 255, 255, 22),
-            grid: Color32::from_rgb(34, 34, 36),
-            text: Color32::from_rgb(236, 236, 238),
-            muted: Color32::from_rgb(142, 142, 147),
-            amber: Color32::from_rgb(255, 176, 0),
-            amber_dim: Color32::from_rgb(170, 118, 0),
-            up: Color32::from_rgb(48, 209, 88),
-            down: Color32::from_rgb(255, 69, 58),
-            cyan: Color32::from_rgb(100, 210, 255),
-            control: Color32::from_rgba_unmultiplied(255, 255, 255, 18),
-            control_hover: Color32::from_rgba_unmultiplied(255, 255, 255, 30),
-            accent,
-            series: [
-                Color32::from_rgb(10, 132, 255),
-                Color32::from_rgb(255, 55, 95),
-                Color32::from_rgb(255, 214, 10),
-                Color32::from_rgb(100, 210, 255),
-                Color32::from_rgb(200, 200, 205),
-                Color32::from_rgb(255, 159, 10),
-            ],
-        }
-    }
-
-    pub fn light(accent: Color32) -> Self {
-        Self {
-            dark: false,
-            window: Color32::from_rgb(236, 236, 238),
-            sidebar: Color32::from_rgba_unmultiplied(246, 246, 248, 150),
-            card: Color32::from_rgb(255, 255, 255),
-            card_header: Color32::from_rgb(244, 244, 246),
-            border: Color32::from_rgba_unmultiplied(0, 0, 0, 26),
-            grid: Color32::from_rgb(234, 234, 237),
-            text: Color32::from_rgb(29, 29, 31),
-            muted: Color32::from_rgb(110, 110, 115),
-            amber: Color32::from_rgb(178, 104, 0),
-            amber_dim: Color32::from_rgb(196, 150, 70),
-            up: Color32::from_rgb(28, 150, 64),
-            down: Color32::from_rgb(215, 40, 40),
-            cyan: Color32::from_rgb(0, 122, 204),
-            control: Color32::from_rgba_unmultiplied(0, 0, 0, 14),
-            control_hover: Color32::from_rgba_unmultiplied(0, 0, 0, 24),
-            accent,
-            series: [
-                Color32::from_rgb(0, 122, 255),
-                Color32::from_rgb(214, 0, 120),
-                Color32::from_rgb(196, 140, 0),
-                Color32::from_rgb(0, 150, 170),
-                Color32::from_rgb(90, 90, 96),
-                Color32::from_rgb(220, 110, 0),
-            ],
-        }
-    }
-
-    pub fn for_theme(theme: Theme, accent: Color32) -> Self {
-        match theme {
-            Theme::Dark => Self::dark(accent),
-            Theme::Light => Self::light(accent),
-        }
-    }
-}
-
-impl Palette {
-    /// Apply the user's colour overrides.
-    pub fn customized(mut self, a: &Appearance) -> Self {
-        let rgb = |c: [u8; 3]| Color32::from_rgb(c[0], c[1], c[2]);
-        if let Some(c) = a.up {
-            self.up = rgb(c);
-        }
-        if let Some(c) = a.down {
-            self.down = rgb(c);
-        }
-        if let Some(c) = a.highlight {
-            self.amber = rgb(c);
-            self.amber_dim = rgb(c.map(|x| (x as f32 * 0.66) as u8));
-        }
-        self
+        crate::themes::terminal_dark().palette(accent)
     }
 }
 
@@ -184,6 +106,14 @@ pub fn amber_dim() -> Color32 {
 pub fn up() -> Color32 {
     palette().up
 }
+pub fn candle_up() -> Color32 {
+    palette().candle_up
+}
+
+pub fn candle_down() -> Color32 {
+    palette().candle_down
+}
+
 pub fn down() -> Color32 {
     palette().down
 }
@@ -314,13 +244,13 @@ fn accent_wash_for(p: &Palette) -> Color32 {
 }
 
 /// One-time setup: fonts and text styles. Visuals are refreshed by [`refresh`].
-/// Apply appearance preferences: fonts, text scale, density, theme mode and colours.
-/// `system_accent` is used unless the user picked an accent.
-pub fn configure(ctx: &egui::Context, a: &Appearance, system_accent: Color32) {
-    install_fonts(ctx, a.mono_font);
-    SCALE.with(|c| c.set(a.font_scale.clamp(0.7, 1.6)));
-    DENSITY.with(|c| c.set(a.density.factor()));
-    UI_MONO.with(|c| c.set(a.ui_font == UiFont::Monospace));
+/// Apply a theme's fonts, text scale and density, and its colours. `system_accent` is
+/// used when the theme does not set an accent. Call when the theme changes.
+pub fn configure(ctx: &egui::Context, t: &crate::themes::Theme, system_accent: Color32) {
+    install_fonts(ctx, t.fonts.mono);
+    SCALE.with(|c| c.set(t.fonts.scale.clamp(0.7, 1.6)));
+    DENSITY.with(|c| c.set(t.density.factor()));
+    UI_MONO.with(|c| c.set(t.fonts.ui == UiFont::Monospace));
     let d = density();
     ctx.all_styles_mut(|s| {
         s.text_styles = [
@@ -337,23 +267,20 @@ pub fn configure(ctx: &egui::Context, a: &Appearance, system_accent: Color32) {
         s.spacing.menu_margin = egui::Margin::same((6.0 * d) as i8);
         s.animation_time = 0.18;
     });
-    ctx.set_theme(match a.mode {
-        ThemeMode::System => egui::ThemePreference::System,
-        ThemeMode::Light => egui::ThemePreference::Light,
-        ThemeMode::Dark => egui::ThemePreference::Dark,
-    });
+    // egui's own widgets follow the theme's light/dark base.
+    ctx.set_theme(if t.dark { egui::ThemePreference::Dark } else { egui::ThemePreference::Light });
     // Force visuals to be rebuilt with the new colours.
     set_palette(Palette { accent: Color32::TRANSPARENT, ..palette() });
-    refresh(ctx, a, system_accent);
+    refresh(ctx, t, system_accent);
 }
 
-/// Pick the palette for the current system appearance and accent; call every frame.
-pub fn refresh(ctx: &egui::Context, a: &Appearance, system_accent: Color32) {
-    let accent = a.accent.map_or(system_accent, |c| Color32::from_rgb(c[0], c[1], c[2]));
-    let p = Palette::for_theme(ctx.theme(), accent).customized(a);
+/// Keep the palette in step with the theme and system accent; cheap, call every frame.
+pub fn refresh(ctx: &egui::Context, t: &crate::themes::Theme, system_accent: Color32) {
+    let p = t.palette(system_accent);
     if p != palette() {
-        ctx.set_visuals_of(Theme::Dark, visuals(&Palette::dark(accent).customized(a)));
-        ctx.set_visuals_of(Theme::Light, visuals(&Palette::light(accent).customized(a)));
+        let v = visuals(&p);
+        ctx.set_visuals_of(Theme::Dark, v.clone());
+        ctx.set_visuals_of(Theme::Light, v);
     }
     set_palette(p);
 }
@@ -364,19 +291,14 @@ mod tests {
 
     #[test]
     fn palettes_are_readable() {
-        for p in [Palette::dark(DEFAULT_ACCENT), Palette::light(DEFAULT_ACCENT)] {
+        for p in [Palette::dark(DEFAULT_ACCENT), crate::themes::terminal_light().palette(DEFAULT_ACCENT)] {
             let lum = |c: Color32| 0.299 * c.r() as f32 + 0.587 * c.g() as f32 + 0.114 * c.b() as f32;
             // Body text contrasts strongly with the card it sits on.
             assert!((lum(p.text) - lum(p.card)).abs() > 150.0, "{}", p.dark);
             assert!((lum(p.muted) - lum(p.card)).abs() > 60.0);
         }
-        set_palette(Palette::light(Color32::RED));
+        set_palette(crate::themes::terminal_light().palette(Color32::RED));
         assert_eq!(accent(), Color32::RED);
         assert!(!palette().dark);
-        let a = Appearance { up: Some([1, 2, 3]), highlight: Some([200, 100, 0]), ..Default::default() };
-        let p = Palette::dark(DEFAULT_ACCENT).customized(&a);
-        assert_eq!(p.up, Color32::from_rgb(1, 2, 3));
-        assert_eq!(p.amber, Color32::from_rgb(200, 100, 0));
-        assert_eq!(p.down, Palette::dark(DEFAULT_ACCENT).down);
     }
 }

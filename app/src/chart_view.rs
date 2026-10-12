@@ -634,8 +634,8 @@ impl ChartState {
             });
         }
         let style = Style {
-            up: theme::rgba(theme::up()),
-            down: theme::rgba(theme::down()),
+            up: theme::rgba(theme::candle_up()),
+            down: theme::rgba(theme::candle_down()),
             color: theme::rgba(amber()),
             pixels_per_point: ui.ctx().pixels_per_point(),
             ..Style::default()

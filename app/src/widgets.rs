@@ -82,6 +82,8 @@ pub fn segmented_width(ui: &Ui, labels: &[&str], height: f32) -> f32 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Icon {
     Sidebar,
+    /// The sidebar glyph mirrored, for a sidebar on the right.
+    SidebarRight,
     Refresh,
     Bell,
     Gauge,
@@ -105,10 +107,11 @@ pub fn draw_icon(p: &egui::Painter, r: Rect, icon: Icon, color: Color32) {
     let u = r.height().min(r.width()) / 16.0;
     let pt = |x: f32, y: f32| pos2(c.x + x * u, c.y + y * u);
     match icon {
-        Icon::Sidebar => {
+        Icon::Sidebar | Icon::SidebarRight => {
             let b = Rect::from_center_size(c, vec2(14.0 * u, 11.0 * u));
             p.rect_stroke(b, 2.0, s, StrokeKind::Middle);
-            p.vline(b.left() + 4.5 * u, b.y_range(), s);
+            let x = if icon == Icon::Sidebar { b.left() + 4.5 * u } else { b.right() - 4.5 * u };
+            p.vline(x, b.y_range(), s);
         }
         Icon::Refresh => {
             let pts: Vec<Pos2> = (0..=20)
