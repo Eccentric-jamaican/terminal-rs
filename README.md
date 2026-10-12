@@ -2,8 +2,9 @@
 
 A fast, keyboard-driven market terminal in pure Rust: TradingView-class GPU charting with a
 Bloomberg Terminal look (black background, amber monospace, dense tiled panes, a command line
-like `AAPL <GO>`), plus **congressional trade tracking ingested directly from the official STOCK
-Act disclosure systems**.
+like `AAPL <GO>`) across **stocks, ETFs, indices, FX, crypto, US Treasuries and futures/commodities**,
+plus **congressional trade tracking ingested directly from the official STOCK Act disclosure
+systems**.
 
 ![terminal-rs: chart with fib/trendline drawings and congress markers, alerts, per-ticker congress list, watchlist, live feed and a politician profile](docs/img/terminal.png)
 
@@ -16,6 +17,22 @@ Act disclosure systems**.
 
 ## Features
 
+- **Multi-asset with Bloomberg-style market keys** — `AAPL <EQUITY>`, `SPY <EQUITY>`,
+  `SPX <INDEX>`, `BTCUSD <CRNCY>`, `EURUSD <CRNCY>`, `US10Y <GOVT>`, `CL1 <CMDTY>` (keys display
+  as `AAPL US Equity`, `BTCUSD Curncy`, `US10Y Govt`, `CL1 Comdty`). The yellow key is optional for
+  known tickers. A built-in catalog covers ~120 instruments (regional indices, equity index futures,
+  energy/metals/grains, the full Treasury curve, majors and crosses, top crypto, popular ETFs and
+  large caps); anything else resolves by convention.
+- **Symbol search everywhere** — typing in the command line shows matches across all asset classes
+  (catalog instantly, plus Yahoo search after a short pause); ↑/↓, Tab, Enter. `SECF gold cmdty`
+  opens a full search panel.
+- **WEI world markets** (`WEI`) — Americas/EMEA/Asia-Pacific indices, equity futures, Treasuries,
+  currencies, crypto and commodities with last, net and percent change (bp for yields) and
+  sparklines, refreshed every 20 s.
+- **Yield curve** (`GC`) — the US Treasury par curve now vs one month and one year ago, tenor
+  table with bp changes and 2s10s / 3m10y / 5s30s spreads.
+- **Live crypto charts** — Binance kline websocket (Coinbase ticker channel as fallback) updates
+  the forming bar in real time; charts show a LIVE badge.
 - **Command line** — `<SECURITY> [<FUNCTION>] <GO>` (Enter is `<GO>`); typing anywhere starts a
   command, with a live interpretation underneath (`5` → "Interval 5 minutes"). History with ↑/↓.
 - **Tiling layouts** — `LAYOUT 1|2|2H|3|4|6`, Tab to cycle focus; any pane can be a chart, the
@@ -27,11 +44,19 @@ Act disclosure systems**.
 - **Drawings** — trendline (Alt+T), horizontal (Alt+H), vertical (Alt+V) and fib retracement
   (Alt+F), stored in (time, price) so they survive zoom and timeframe changes; magnet (Alt+M) snaps
   to OHLC; click to select, Del to remove.
-- **Market data behind a trait** (`tr_data::MarketData`) — Alpaca when `APCA_API_KEY_ID` and
-  `APCA_API_SECRET_KEY` are set (free IEX feed; `APCA_DATA_FEED` to override), otherwise Yahoo
-  Finance history (no key); `TR_PROVIDER=sample` runs fully offline on deterministic sample data,
-  and live providers fall back to sample data when the network is unavailable. Bars are cached in
-  SQLite so charts paint from disk on start. Older history pages in as you scroll left.
+- **Market data behind a trait** (`tr_data::MarketData`), routed per asset class to free sources:
+
+  | Asset class | History | Quotes | Live |
+  |---|---|---|---|
+  | Crypto | Binance public REST (`data-api.binance.vision`, then `api.binance.com`), Coinbase Exchange fallback | Binance 24h ticker | Binance kline websocket, Coinbase ticker fallback |
+  | US Treasuries | Treasury.gov daily par yield curve CSV (FRED fallback); Yahoo `^IRX/^FVX/^TNX/^TYX` intraday | Treasury.gov | — |
+  | FX, indices, futures | Yahoo Finance (`EURUSD=X`, `^GSPC`, `CL=F`) | Yahoo spark (batched) | — |
+  | Stocks, ETFs | Alpaca when `APCA_API_KEY_ID`/`APCA_API_SECRET_KEY` are set, else Yahoo | Yahoo spark | — |
+
+  No keys are required. `TR_PROVIDER=sample` runs fully offline on deterministic, class-aware sample
+  data (BTCUSD near 65,000, EURUSD near 1.09, US10Y near 4.2%) **with simulated live ticks**, and
+  the live router falls back to sample data when a source is unreachable. Bars are cached in SQLite
+  so charts paint from disk on start. Older history pages in as you scroll left.
 - **Congress trades** (key feature)
   - Ingests Periodic Transaction Reports from the **Senate eFD** (efdsearch.senate.gov: agreement
     + CSRF session, DataTables search API, HTML transaction tables) and the **House Clerk**
@@ -72,6 +97,8 @@ Press **F1** (or type `HELP`) for the full command and hotkey list. Highlights:
 | Input | Action |
 |---|---|
 | `AAPL` · `AAPL US EQUITY <GO>` | load a security in the focused chart |
+| `BTCUSD <CRNCY>` · `EURUSD <CRNCY>` · `US10Y <GOVT>` · `CL1 <CMDTY>` · `SPX <INDEX>` | other asset classes |
+| `WEI` · `GC` · `SECF <query>` | world markets · yield curve · security search |
 | `5` `1H` `D` `1W` `1M` · `YTD` `5Y` `ALL` | interval · quick range |
 | `RSI` `MACD` `BB` `SMA 50` `EMA 20` `VWAP` · `CLEAR` | toggle indicators |
 | `CMP MSFT` · `LOG` · `CANDLE` `BAR` `LINE` `AREA` | compare · log scale · chart type |
@@ -85,8 +112,9 @@ Press **F1** (or type `HELP`) for the full command and hotkey list. Highlights:
 ```
 app/            eframe shell: command line, tiling panes, chart widget, congress panels
   worker.rs     tokio runtime: all network, SQLite, pyramid and indicator work (UI never blocks)
-crates/core     Bar/Series, timeframes and resampling, indicators, deterministic sample data
-crates/data     MarketData trait; Alpaca, Yahoo, sample providers; SQLite bar cache
+crates/core     Bar/Series, timeframes, market keys + security catalog, indicators, sample data
+crates/data     MarketData trait; per-class router (Binance/Coinbase, Treasury.gov/FRED, Yahoo,
+                Alpaca), websocket live feeds, sample provider with simulated ticks; bar cache
 crates/chart    wgpu renderer, LOD pyramids, viewport math, axes, drawings, egui paint callback
 crates/congress Senate eFD + House Clerk parsers, rosters, SQLite store, refresh, alerts, performance
 docs/analysis   REA research notes on TradingView chart UX
@@ -102,7 +130,9 @@ markers are cheap egui shapes.
 
 **Threading.** The UI thread sends requests to the worker and drains responses each frame; history
 fetches, pyramid building (≈ 200 ms for 1M bars), indicators, SQLite queries and the congress ingest
-all run on tokio tasks.
+all run on tokio tasks. The worker owns each chart's bar series, so initial history, paging and live
+websocket ticks merge into one copy; live updates are coalesced to at most four GPU re-uploads a
+second.
 
 ## Performance
 
@@ -135,7 +165,7 @@ Measured on Linux with Mesa **llvmpipe (a CPU software rasterizer)** — a real 
 
 ```sh
 cargo test --workspace                       # unit + fixture tests (parsers, indicators, chart, app)
-cargo test -p tr-data -- --ignored           # live Yahoo history/paging test
+cargo test -p tr-data -- --ignored           # live tests: every asset class, quotes, curve, search, websocket
 cargo bench -p tr-core && cargo bench -p tr-chart
 ```
 
@@ -144,6 +174,10 @@ cargo bench -p tr-core && cargo bench -p tr-chart
   spouse/joint owners, wrapped and open-ended amounts, CUSIP vs ticker, exchanges, private holdings,
   a scanned paper filing, Senate search JSON (electronic, paper and amended reports) and PTR tables.
   An end-to-end refresh test covers discovery, roster joins, idempotency and alerts.
+- Data-source parsers are tested against captured responses: Binance klines/24h ticker/websocket
+  kline frames, Coinbase candles/stats/websocket ticker, Treasury.gov curve CSV, FRED CSV, Yahoo
+  chart/spark/search. Market-key parsing, catalog search and symbol mapping per source are unit
+  tested; opt-in live tests hit the real sources for every asset class.
 - Indicators are checked against reference values (Wilder's RSI example, hand-computed EMA, MACD,
   population-SD Bollinger, session VWAP).
 - The chart renders real frames offscreen on whatever adapter is present and checks pixels.

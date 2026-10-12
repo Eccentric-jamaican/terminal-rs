@@ -134,6 +134,7 @@ pub struct TerminalApp {
     last_feed: Option<Instant>,
     last_save: Instant,
     started: Instant,
+    smoke_done: bool,
     /// Frame-time readout (F12): smoothed CPU time of `ui()` and interval between frames.
     show_perf: bool,
     perf_cpu_ms: f64,
@@ -214,6 +215,7 @@ impl TerminalApp {
             last_feed: None,
             last_save: Instant::now(),
             started: Instant::now(),
+            smoke_done: false,
             show_perf: std::env::var_os("TR_FPS").is_some(),
             perf_cpu_ms: 0.0,
             perf_dt_ms: 0.0,
@@ -1280,6 +1282,22 @@ impl eframe::App for TerminalApp {
         self.run_actions(actions);
         self.toasts(&ctx);
 
+        // TR_SMOKE_SECS=N: render for N seconds, log frame stats and quit (CI smoke test).
+        if let Some(secs) = std::env::var("TR_SMOKE_SECS").ok().and_then(|v| v.parse::<f64>().ok()) {
+            ctx.request_repaint();
+            if !self.smoke_done && self.started.elapsed().as_secs_f64() > secs {
+                self.smoke_done = true;
+                tracing::info!(
+                    "smoke: {} frames in {:.1}s, ui cpu {:.2} ms/frame, panes {}",
+                    ctx.cumulative_frame_nr(),
+                    self.started.elapsed().as_secs_f64(),
+                    self.perf_cpu_ms,
+                    self.panes.len()
+                );
+                self.save_settings();
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
         let cpu = frame_start.elapsed().as_secs_f64() * 1e3;
         self.perf_cpu_ms = self.perf_cpu_ms * 0.9 + cpu * 0.1;
         if self.show_perf {
