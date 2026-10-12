@@ -3,7 +3,6 @@ name = "terminal-rs"
 description = "Bloomberg-style trading terminal with GPU charts and congressional trade tracking"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 default-run = "terminal-rs"
 
 [dependencies]
