@@ -1,0 +1,470 @@
+//! Background worker. All network, SQLite, indicator and LOD-pyramid work runs on a
+//! tokio runtime; the UI thread only sends [`Request`]s and drains [`Response`]s, so it
+//! never blocks.
+
+use std::path::PathBuf;
+use std::sync::{Arc, mpsc};
+use std::time::Duration;
+
+use chrono::Datelike;
+use tokio::sync::Mutex;
+use tr_chart::gpu::{LineKind, LineRef};
+use tr_chart::scene::{Overlay, SeriesGpu, line_ref};
+use tr_congress::db::{Alert, PoliticianSummary};
+use tr_congress::performance::{self, Performance, TradeReturn};
+use tr_congress::refresh::{self, HttpSource, NewTradeAlert, RefreshConfig};
+use tr_congress::{Db, Politician, Trade};
+use tr_core::{Bar, Timeframe, indicators};
+use tr_data::{BarCache, Provider, Quote};
+
+use crate::command::IndicatorSpec;
+use crate::theme;
+
+pub type PaneId = u64;
+
+pub enum Request {
+    History { pane: PaneId, generation: u64, symbol: String, tf: Timeframe, limit: usize },
+    /// Prepend older history to `existing`.
+    MoreHistory { pane: PaneId, generation: u64, symbol: String, tf: Timeframe, existing: Arc<Vec<Bar>>, limit: usize },
+    Indicators { pane: PaneId, generation: u64, bars: Arc<Vec<Bar>>, tf: Timeframe, specs: Vec<IndicatorSpec> },
+    Compare { pane: PaneId, generation: u64, symbol: String, tf: Timeframe, base: Arc<Vec<Bar>> },
+    Markers { pane: PaneId, symbol: String },
+    Quotes(Vec<String>),
+    Latest { limit: usize },
+    TickerTrades { pane: PaneId, symbol: String },
+    Profile { pane: PaneId, query: String },
+    SearchPoliticians(String),
+    Track { query: String, on: bool },
+    Alerts,
+    MarkAlertsSeen,
+    RefreshCongress,
+}
+
+pub struct BuiltIndicator {
+    pub spec: IndicatorSpec,
+    pub overlays: Vec<(String, Overlay)>,
+}
+
+pub struct Profile {
+    pub politician: Politician,
+    pub trades: Vec<Trade>,
+    pub perf: Performance,
+    pub returns: Vec<TradeReturn>,
+    pub tracked: bool,
+}
+
+pub enum Response {
+    History {
+        pane: PaneId,
+        generation: u64,
+        symbol: String,
+        tf: Timeframe,
+        bars: Arc<Vec<Bar>>,
+        gpu: SeriesGpu,
+        /// Number of bars prepended (paging), 0 otherwise.
+        prepended: usize,
+        from_cache: bool,
+        exhausted: bool,
+    },
+    HistoryError { pane: PaneId, generation: u64, error: String },
+    Indicators { pane: PaneId, generation: u64, built: Vec<BuiltIndicator> },
+    Compare { pane: PaneId, generation: u64, symbol: String, line: LineRef },
+    Markers { pane: PaneId, symbol: String, trades: Vec<Trade> },
+    Quotes(Vec<Quote>),
+    Latest(Vec<Trade>),
+    TickerTrades { pane: PaneId, symbol: String, trades: Vec<Trade> },
+    Profile { pane: PaneId, profile: Option<Box<Profile>>, query: String },
+    Politicians(Vec<PoliticianSummary>),
+    Alerts(Vec<Alert>),
+    NewAlerts(Vec<NewTradeAlert>),
+    Status(String),
+    CongressRefreshed(String),
+}
+
+pub struct Worker {
+    tx: tokio::sync::mpsc::UnboundedSender<Request>,
+    pub rx: mpsc::Receiver<Response>,
+    _rt: tokio::runtime::Runtime,
+}
+
+struct Shared {
+    provider: Provider,
+    cache: std::sync::Mutex<Option<BarCache>>,
+    db: Mutex<Db>,
+    out: mpsc::Sender<Response>,
+    ctx: egui::Context,
+}
+
+impl Shared {
+    fn send(&self, r: Response) {
+        let _ = self.out.send(r);
+        self.ctx.request_repaint();
+    }
+}
+
+pub fn data_dir() -> PathBuf {
+    if let Some(d) = std::env::var_os("TR_DATA_DIR") {
+        return PathBuf::from(d);
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/terminal-rs")
+    } else {
+        std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".local/share")).join("terminal-rs")
+    }
+}
+
+impl Worker {
+    pub fn spawn(ctx: egui::Context, provider: Provider) -> anyhow::Result<Self> {
+        let dir = data_dir();
+        std::fs::create_dir_all(&dir)?;
+        let db = Db::open(dir.join("congress.sqlite3")).or_else(|e| {
+            tracing::warn!("congress db unavailable ({e:#}); using in-memory store");
+            Db::open_in_memory()
+        })?;
+        let cache = BarCache::open(dir.join("bars.sqlite3")).map_err(|e| tracing::warn!("bar cache unavailable: {e:#}")).ok();
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().thread_name("tr-worker").build()?;
+        let (tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel::<Request>();
+        let (out, rx) = mpsc::channel();
+        let shared = Arc::new(Shared { provider, cache: std::sync::Mutex::new(cache), db: Mutex::new(db), out, ctx });
+
+        // Request dispatcher: every request runs as its own task.
+        let s = shared.clone();
+        rt.spawn(async move {
+            while let Some(req) = req_rx.recv().await {
+                let s = s.clone();
+                tokio::spawn(async move { handle(&s, req).await });
+            }
+        });
+
+        // Scheduled congressional disclosure refresh.
+        let s = shared.clone();
+        rt.spawn(async move {
+            let minutes: u64 = std::env::var("TR_CONGRESS_REFRESH_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+            if minutes == 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            let mut tick = tokio::time::interval(Duration::from_secs(minutes * 60));
+            loop {
+                tick.tick().await;
+                congress_refresh(&s).await;
+            }
+        });
+        Ok(Self { tx, rx, _rt: rt })
+    }
+
+    pub fn send(&self, req: Request) {
+        let _ = self.tx.send(req);
+    }
+}
+
+async fn congress_refresh(s: &Shared) {
+    s.send(Response::Status("Refreshing congressional disclosures (Senate eFD + House Clerk)…".into()));
+    let source = match HttpSource::new() {
+        Ok(src) => src,
+        Err(e) => return s.send(Response::Status(format!("congress refresh failed: {e:#}"))),
+    };
+    let cfg = RefreshConfig::incremental(&*s.db.lock().await);
+    match refresh::refresh(&source, &s.db, &cfg).await {
+        Ok(report) => {
+            if !report.alerts.is_empty() {
+                s.send(Response::NewAlerts(report.alerts.clone()));
+            }
+            s.send(Response::CongressRefreshed(report.summary()));
+        }
+        Err(e) => s.send(Response::Status(format!("congress refresh failed: {e:#}"))),
+    }
+}
+
+fn session_key(tf: Timeframe) -> impl Fn(i64) -> i64 {
+    move |ts| {
+        let d = chrono::DateTime::from_timestamp(ts, 0).unwrap_or_default();
+        match tf {
+            t if t.is_intraday() => ts.div_euclid(86_400),
+            Timeframe::D1 => (d.year() * 12 + d.month() as i32) as i64,
+            _ => d.year() as i64,
+        }
+    }
+}
+
+fn overlay(values: &[f64], color: egui::Color32, kind: LineKind) -> Overlay {
+    Overlay { line: line_ref(values), color: theme::rgba(color), kind }
+}
+
+pub fn build_indicators(bars: &[Bar], tf: Timeframe, specs: &[IndicatorSpec]) -> Vec<BuiltIndicator> {
+    let closes: Vec<f64> = bars.iter().map(|b| b.close).collect();
+    specs
+        .iter()
+        .enumerate()
+        .map(|(i, spec)| {
+            let c = theme::SERIES[i % theme::SERIES.len()];
+            let overlays = match *spec {
+                IndicatorSpec::Sma(n) => vec![(spec.label(), overlay(&indicators::sma(&closes, n), c, LineKind::Line))],
+                IndicatorSpec::Ema(n) => vec![(spec.label(), overlay(&indicators::ema(&closes, n), c, LineKind::Line))],
+                IndicatorSpec::Vwap => vec![(spec.label(), overlay(&indicators::vwap_by(bars, session_key(tf)), c, LineKind::Line))],
+                IndicatorSpec::Bollinger(n, k) => {
+                    let b = indicators::bollinger(&closes, n, k);
+                    let dim = c.gamma_multiply(0.7);
+                    vec![
+                        ("BB upper".into(), overlay(&b.upper, dim, LineKind::Line)),
+                        ("BB basis".into(), overlay(&b.middle, c, LineKind::Line)),
+                        ("BB lower".into(), overlay(&b.lower, dim, LineKind::Line)),
+                    ]
+                }
+                IndicatorSpec::Rsi(n) => vec![(spec.label(), overlay(&indicators::rsi(&closes, n), theme::IND, LineKind::Line))],
+                IndicatorSpec::Macd(f, sl, sg) => {
+                    let m = indicators::macd(&closes, f, sl, sg);
+                    vec![
+                        ("Hist".into(), overlay(&m.histogram, egui::Color32::WHITE, LineKind::Hist)),
+                        ("MACD".into(), overlay(&m.macd, theme::CYAN, LineKind::Line)),
+                        ("Signal".into(), overlay(&m.signal, theme::ORANGE_BAR, LineKind::Line)),
+                    ]
+                }
+            };
+            BuiltIndicator { spec: *spec, overlays }
+        })
+        .collect()
+}
+
+/// Align `other` to `base` timestamps and rescale so both start at the same price at the
+/// first common bar, which is how a compare overlay is read (relative performance).
+pub fn align_compare(base: &[Bar], other: &[Bar]) -> Vec<f64> {
+    let mut out = vec![f64::NAN; base.len()];
+    let mut j = 0;
+    let mut scale = None;
+    for (i, b) in base.iter().enumerate() {
+        while j + 1 < other.len() && other[j + 1].ts <= b.ts {
+            j += 1;
+        }
+        let Some(o) = other.get(j).filter(|o| o.ts <= b.ts) else { continue };
+        let s = *scale.get_or_insert(b.close / o.close);
+        out[i] = o.close * s;
+    }
+    out
+}
+
+fn default_limit(tf: Timeframe) -> usize {
+    match tf {
+        Timeframe::M1 => 5_000,
+        Timeframe::M5 | Timeframe::M15 | Timeframe::M30 => 5_000,
+        Timeframe::H1 | Timeframe::H4 => 4_000,
+        Timeframe::D1 => 6_000,
+        Timeframe::W1 | Timeframe::MN1 => 2_000,
+    }
+}
+
+pub fn initial_limit(tf: Timeframe) -> usize {
+    default_limit(tf)
+}
+
+async fn handle(s: &Shared, req: Request) {
+    match req {
+        Request::History { pane, generation, symbol, tf, limit } => {
+            // Paint from the disk cache immediately, then refresh from the network.
+            let cached = s.cache.lock().ok().and_then(|c| c.as_ref().and_then(|c| c.load(&symbol, tf, limit).ok()));
+            if let Some(bars) = cached.filter(|b| !b.is_empty()) {
+                let bars = Arc::new(bars);
+                let gpu = build_gpu(bars.clone()).await;
+                s.send(Response::History { pane, generation, symbol: symbol.clone(), tf, bars, gpu, prepended: 0, from_cache: true, exhausted: false });
+            }
+            match s.provider.history(&symbol, tf, None, limit).await {
+                Ok(bars) if !bars.is_empty() => {
+                    if let Ok(mut c) = s.cache.lock() {
+                        if let Some(c) = c.as_mut() {
+                            let _ = c.store(&symbol, tf, &bars);
+                        }
+                    }
+                    let exhausted = bars.len() < limit / 2;
+                    let bars = Arc::new(bars);
+                    let gpu = build_gpu(bars.clone()).await;
+                    s.send(Response::History { pane, generation, symbol, tf, bars, gpu, prepended: 0, from_cache: false, exhausted });
+                }
+                Ok(_) => s.send(Response::HistoryError { pane, generation, error: format!("no data for {symbol}") }),
+                Err(e) => s.send(Response::HistoryError { pane, generation, error: format!("{e:#}") }),
+            }
+        }
+        Request::MoreHistory { pane, generation, symbol, tf, existing, limit } => {
+            let Some(first) = existing.first() else { return };
+            match s.provider.history(&symbol, tf, Some(first.ts), limit).await {
+                Ok(older) => {
+                    let older: Vec<Bar> = older.into_iter().filter(|b| b.ts < first.ts).collect();
+                    let prepended = older.len();
+                    let mut merged = older;
+                    merged.extend_from_slice(&existing);
+                    let bars = Arc::new(merged);
+                    let gpu = build_gpu(bars.clone()).await;
+                    s.send(Response::History { pane, generation, symbol, tf, bars, gpu, prepended, from_cache: false, exhausted: prepended == 0 });
+                }
+                Err(e) => s.send(Response::HistoryError { pane, generation, error: format!("{e:#}") }),
+            }
+        }
+        Request::Indicators { pane, generation, bars, tf, specs } => {
+            let built = tokio::task::spawn_blocking(move || build_indicators(&bars, tf, &specs)).await.unwrap_or_default();
+            s.send(Response::Indicators { pane, generation, built });
+        }
+        Request::Compare { pane, generation, symbol, tf, base } => {
+            let limit = base.len().max(100);
+            match s.provider.history(&symbol, tf, None, limit).await {
+                Ok(other) => {
+                    let line = tokio::task::spawn_blocking(move || line_ref(&align_compare(&base, &other))).await;
+                    if let Ok(line) = line {
+                        s.send(Response::Compare { pane, generation, symbol, line });
+                    }
+                }
+                Err(e) => s.send(Response::Status(format!("compare {symbol}: {e:#}"))),
+            }
+        }
+        Request::Markers { pane, symbol } => {
+            let trades = s.db.lock().await.trades_for_ticker(&symbol, 2_000).unwrap_or_default();
+            s.send(Response::Markers { pane, symbol, trades });
+        }
+        Request::Quotes(symbols) => match s.provider.quotes(&symbols).await {
+            Ok(q) => s.send(Response::Quotes(q)),
+            Err(e) => s.send(Response::Status(format!("quotes: {e:#}"))),
+        },
+        Request::Latest { limit } => {
+            let t = s.db.lock().await.latest_trades(limit).unwrap_or_default();
+            s.send(Response::Latest(t));
+        }
+        Request::TickerTrades { pane, symbol } => {
+            let trades = s.db.lock().await.trades_for_ticker(&symbol, 1_000).unwrap_or_default();
+            s.send(Response::TickerTrades { pane, symbol, trades });
+        }
+        Request::Profile { pane, query } => {
+            let profile = profile(s, &query).await;
+            s.send(Response::Profile { pane, profile: profile.map(Box::new), query });
+        }
+        Request::SearchPoliticians(q) => {
+            let r = s.db.lock().await.search_politicians(&q, 500).unwrap_or_default();
+            s.send(Response::Politicians(r));
+        }
+        Request::Track { query, on } => {
+            let db = s.db.lock().await;
+            let hit = resolve_politician(&db, &query);
+            match hit {
+                Some(p) => {
+                    let _ = db.set_tracked(p.id, on);
+                    let verb = if on { "Tracking" } else { "Stopped tracking" };
+                    s.send(Response::Status(format!("{verb} {} — alerts fire when they file a new PTR", p.name)));
+                }
+                None => s.send(Response::Status(format!("No politician matches '{query}' yet (run REFRESH)"))),
+            }
+            let r = db.search_politicians("", 500).unwrap_or_default();
+            s.send(Response::Politicians(r));
+        }
+        Request::Alerts => {
+            let a = s.db.lock().await.alerts(false, 200).unwrap_or_default();
+            s.send(Response::Alerts(a));
+        }
+        Request::MarkAlertsSeen => {
+            let db = s.db.lock().await;
+            let _ = db.mark_alerts_seen();
+            s.send(Response::Alerts(db.alerts(false, 200).unwrap_or_default()));
+        }
+        Request::RefreshCongress => congress_refresh(s).await,
+    }
+}
+
+async fn build_gpu(bars: Arc<Vec<Bar>>) -> SeriesGpu {
+    tokio::task::spawn_blocking(move || SeriesGpu::build(&bars)).await.expect("pyramid build task")
+}
+
+fn resolve_politician(db: &Db, query: &str) -> Option<Politician> {
+    if let Ok(id) = query.trim().parse::<i64>() {
+        return db.politician(id).ok().flatten();
+    }
+    // Prefer an exact last-name hit, then substring matches by activity.
+    let all = db.search_politicians(query.trim(), 50).ok()?;
+    let q = query.trim().to_ascii_lowercase();
+    all.iter()
+        .find(|p| p.politician.name.to_ascii_lowercase().split_whitespace().last() == Some(q.as_str()))
+        .or(all.first())
+        .map(|p| p.politician.clone())
+}
+
+async fn profile(s: &Shared, query: &str) -> Option<Profile> {
+    let (politician, trades, tracked) = {
+        let db = s.db.lock().await;
+        let p = resolve_politician(&db, query)?;
+        let trades = db.trades_for_politician(p.id).ok()?;
+        let tracked = db.is_tracked(p.id).unwrap_or(false);
+        (p, trades, tracked)
+    };
+    // Daily closes for each traded ticker (bounded) to estimate performance.
+    let mut tickers: Vec<String> = trades.iter().filter_map(|t| t.ticker.clone()).collect();
+    tickers.sort();
+    tickers.dedup();
+    tickers.truncate(40);
+    let oldest = trades.iter().map(|t| t.tx_date).min();
+    let days = oldest.map(|d| (chrono::Utc::now().date_naive() - d).num_days().max(30) as usize + 10).unwrap_or(400);
+    let mut prices: std::collections::HashMap<String, Vec<Bar>> = std::collections::HashMap::new();
+    let provider = s.provider.clone();
+    let fetches = tickers.into_iter().map(|t| {
+        let provider = provider.clone();
+        async move {
+            let r = provider.history(&t, Timeframe::D1, None, days.min(4000)).await;
+            (t, r)
+        }
+    });
+    for (t, r) in futures_join(fetches).await {
+        if let Ok(b) = r {
+            prices.insert(t, b);
+        }
+    }
+    let (perf, returns) = performance::estimate(
+        &trades,
+        |tk, date| {
+            let bars = prices.get(tk)?;
+            let ts = date.and_hms_opt(23, 59, 59)?.and_utc().timestamp();
+            let i = bars.partition_point(|b| b.ts <= ts).checked_sub(1)?;
+            Some(bars[i].close)
+        },
+        |tk| prices.get(tk).and_then(|b| b.last()).map(|b| b.close),
+    );
+    Some(Profile { politician, trades, perf, returns, tracked })
+}
+
+/// Run futures concurrently, at most 6 in flight (keeps data providers happy).
+async fn futures_join<F, T>(futs: impl Iterator<Item = F>) -> Vec<T>
+where
+    F: std::future::Future<Output = T>,
+{
+    use futures::StreamExt;
+    futures::stream::iter(futs).buffered(6).collect().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compare_alignment_rescales_to_base() {
+        let base: Vec<Bar> = (0..5).map(|i| Bar::new(i * 10, 100.0, 100.0, 100.0, 100.0 + i as f64, 1.0)).collect();
+        let other: Vec<Bar> = vec![Bar::new(5, 0.0, 0.0, 0.0, 50.0, 1.0), Bar::new(25, 0.0, 0.0, 0.0, 55.0, 1.0)];
+        let a = align_compare(&base, &other);
+        assert!(a[0].is_nan());
+        assert_eq!(a[1], 101.0); // first common bar: scaled to base close
+        assert_eq!(a[2], 101.0);
+        assert!((a[3] - 55.0 * 101.0 / 50.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn indicators_build_expected_overlays() {
+        let bars = tr_core::sample::generate("X", Timeframe::D1, 300, 1_790_000_000);
+        let built = build_indicators(&bars, Timeframe::D1, &[IndicatorSpec::Bollinger(20, 2.0), IndicatorSpec::Macd(12, 26, 9), IndicatorSpec::Vwap]);
+        assert_eq!(built[0].overlays.len(), 3);
+        assert_eq!(built[1].overlays[0].1.kind, LineKind::Hist);
+        assert_eq!(built[2].overlays.len(), 1);
+    }
+
+    #[test]
+    fn join_all_runs_everything() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        let out = rt.block_on(futures_join((0..20).map(|i| async move {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            i * 2
+        })));
+        assert_eq!(out, (0..20).map(|i| i * 2).collect::<Vec<_>>());
+    }
+}

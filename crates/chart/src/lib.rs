@@ -14,4 +14,5 @@ pub mod scene;
 pub mod scale;
 pub mod viewport;
 
+pub use egui_wgpu;
 pub use egui_wgpu::wgpu;
