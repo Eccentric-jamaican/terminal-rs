@@ -46,6 +46,8 @@ pub enum Request {
         bars: Arc<Vec<Bar>>,
         tf: Timeframe,
         specs: Vec<IndicatorSpec>,
+        /// Colours are baked into overlays, so the UI passes its current palette.
+        palette: theme::Palette,
     },
     Compare {
         pane: PaneId,
@@ -289,13 +291,18 @@ fn overlay(values: &[f64], color: egui::Color32, kind: LineKind) -> Overlay {
     Overlay { line: line_ref(values), color: theme::rgba(color), kind, scale: 1.0 }
 }
 
-pub fn build_indicators(bars: &[Bar], tf: Timeframe, specs: &[IndicatorSpec]) -> Vec<BuiltIndicator> {
+pub fn build_indicators(
+    bars: &[Bar],
+    tf: Timeframe,
+    specs: &[IndicatorSpec],
+    palette: &theme::Palette,
+) -> Vec<BuiltIndicator> {
     let closes: Vec<f64> = bars.iter().map(|b| b.close).collect();
     specs
         .iter()
         .enumerate()
         .map(|(i, spec)| {
-            let c = theme::SERIES[i % theme::SERIES.len()];
+            let c = palette.series[i % palette.series.len()];
             let overlays = match *spec {
                 IndicatorSpec::Sma(n) => vec![(spec.label(), overlay(&indicators::sma(&closes, n), c, LineKind::Line))],
                 IndicatorSpec::Ema(n) => vec![(spec.label(), overlay(&indicators::ema(&closes, n), c, LineKind::Line))],
@@ -312,14 +319,14 @@ pub fn build_indicators(bars: &[Bar], tf: Timeframe, specs: &[IndicatorSpec]) ->
                     ]
                 }
                 IndicatorSpec::Rsi(n) => {
-                    vec![(spec.label(), overlay(&indicators::rsi(&closes, n), theme::IND, LineKind::Line))]
+                    vec![(spec.label(), overlay(&indicators::rsi(&closes, n), palette.series[1], LineKind::Line))]
                 }
                 IndicatorSpec::Macd(f, sl, sg) => {
                     let m = indicators::macd(&closes, f, sl, sg);
                     vec![
                         ("Hist".into(), overlay(&m.histogram, egui::Color32::WHITE, LineKind::Hist)),
-                        ("MACD".into(), overlay(&m.macd, theme::CYAN, LineKind::Line)),
-                        ("Signal".into(), overlay(&m.signal, theme::ORANGE_BAR, LineKind::Line)),
+                        ("MACD".into(), overlay(&m.macd, palette.cyan, LineKind::Line)),
+                        ("Signal".into(), overlay(&m.signal, palette.amber, LineKind::Line)),
                     ]
                 }
             };
@@ -448,9 +455,10 @@ async fn handle(s: &Arc<Shared>, req: Request) {
                 Err(e) => s.send(Response::HistoryError { pane, generation, error: format!("{e:#}") }),
             }
         }
-        Request::Indicators { pane, generation, bars, tf, specs } => {
-            let built =
-                tokio::task::spawn_blocking(move || build_indicators(&bars, tf, &specs)).await.unwrap_or_default();
+        Request::Indicators { pane, generation, bars, tf, specs, palette } => {
+            let built = tokio::task::spawn_blocking(move || build_indicators(&bars, tf, &specs, &palette))
+                .await
+                .unwrap_or_default();
             s.send(Response::Indicators { pane, generation, built });
         }
         Request::Compare { pane, generation, symbol, tf, base } => {
@@ -697,6 +705,7 @@ mod tests {
             &bars,
             Timeframe::D1,
             &[IndicatorSpec::Bollinger(20, 2.0), IndicatorSpec::Macd(12, 26, 9), IndicatorSpec::Vwap],
+            &theme::Palette::light(theme::DEFAULT_ACCENT),
         );
         assert_eq!(built[0].overlays.len(), 3);
         assert_eq!(built[1].overlays[0].1.kind, LineKind::Hist);

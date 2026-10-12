@@ -4075,6 +4075,7 @@ dependencies = [
  "eframe",
  "egui",
  "futures",
+ "raw-window-handle",
  "serde",
  "serde_json",
  "tokio",
@@ -4082,6 +4083,7 @@ dependencies = [
  "tr-congress",
  "tr-core",
  "tr-data",
+ "tr-macos",
  "tracing",
  "tracing-subscriber",
 ]
@@ -4412,6 +4414,15 @@ dependencies = [
  "tokio-tungstenite",
  "tr-core",
  "tracing",
+]
+
+[[package]]
+name = "tr-macos"
+version = "0.1.0"
+dependencies = [
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
 ]
 
 [[package]]

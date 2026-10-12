@@ -9,7 +9,7 @@ use tr_core::{AssetClass, Security};
 use tr_data::{Quote, SearchHit, YieldCurve, YieldCurves};
 
 use crate::congress_view::Action;
-use crate::theme::{self, AMBER, AMBER_DIM, MUTED, TEXT, mono};
+use crate::theme::{self, amber, amber_dim, mono, muted, text, ui_font};
 
 /// Every market key shown on the overview panel.
 pub fn overview_keys() -> Vec<String> {
@@ -62,19 +62,19 @@ fn row(ui: &mut Ui, l: &Listing, quotes: &HashMap<String, Quote>, out: &mut Vec<
     let p = ui.painter_at(rect);
     let y = rect.center().y;
     let mut x = rect.left() + 2.0;
-    p.text(pos2(x, y), Align2::LEFT_CENTER, l.ticker, mono(12.0), AMBER);
+    p.text(pos2(x, y), Align2::LEFT_CENTER, l.ticker, mono(12.0), amber());
     x += 70.0;
     let name: String = l.name.chars().take((w_name / 7.0) as usize).collect();
-    p.text(pos2(x, y), Align2::LEFT_CENTER, name, mono(11.5), MUTED);
+    p.text(pos2(x, y), Align2::LEFT_CENTER, name, mono(11.5), muted());
     let right = rect.right() - 2.0;
     match q {
         Some(q) => {
-            let c = if q.change() >= 0.0 { theme::UP } else { theme::DOWN };
+            let c = if q.change() >= 0.0 { theme::up() } else { theme::down() };
             let d = sec.decimals(q.last);
             let pct = if sec.class == AssetClass::Govt { String::new() } else { format!("{:+.2}%", q.change_pct()) };
             p.text(pos2(right, y), Align2::RIGHT_CENTER, pct, mono(12.0), c);
             p.text(pos2(right - 66.0, y), Align2::RIGHT_CENTER, change_text(&sec, q), mono(12.0), c);
-            p.text(pos2(right - 150.0, y), Align2::RIGHT_CENTER, format!("{:.d$}", q.last), mono(12.0), TEXT);
+            p.text(pos2(right - 150.0, y), Align2::RIGHT_CENTER, format!("{:.d$}", q.last), mono(12.0), text());
             // Sparkline sits left of the price columns (last price is up to ~10 chars wide).
             let spark = Rect::from_min_size(pos2(right - 296.0, rect.top() + 3.0), vec2(48.0, h - 6.0));
             if spark.left() > rect.left() + 150.0 {
@@ -82,7 +82,7 @@ fn row(ui: &mut Ui, l: &Listing, quotes: &HashMap<String, Quote>, out: &mut Vec<
             }
         }
         None => {
-            p.text(pos2(right, y), Align2::RIGHT_CENTER, "…", mono(12.0), MUTED);
+            p.text(pos2(right, y), Align2::RIGHT_CENTER, "…", mono(12.0), muted());
         }
     }
 }
@@ -94,9 +94,9 @@ pub fn wei(ui: &mut Ui, quotes: &HashMap<String, Quote>, updated: Option<&str>) 
     let cols = ((width / 430.0).floor() as usize).clamp(1, 3);
     let col_w = (width - 8.0 * (cols - 1) as f32) / cols as f32;
     ui.horizontal(|ui| {
-        ui.label(RichText::new("WORLD MARKETS").font(mono(12.5)).color(AMBER));
-        ui.label(RichText::new(updated.unwrap_or("loading quotes…")).font(mono(11.0)).color(MUTED));
-        ui.label(RichText::new("click a row to chart it").font(mono(11.0)).color(MUTED));
+        ui.label(RichText::new("WORLD MARKETS").font(mono(12.5)).color(amber()));
+        ui.label(RichText::new(updated.unwrap_or("loading quotes…")).font(mono(11.0)).color(muted()));
+        ui.label(RichText::new("click a row to chart it").font(mono(11.0)).color(muted()));
     });
     egui::ScrollArea::vertical().id_salt("wei").auto_shrink([false, false]).show(ui, |ui| {
         // Distribute groups across columns, keeping them in display order.
@@ -107,14 +107,14 @@ pub fn wei(ui: &mut Ui, quotes: &HashMap<String, Quote>, updated: Option<&str>) 
                 ui.vertical(|ui| {
                     ui.set_width(col_w);
                     for g in groups.iter().skip(c * per).take(per) {
-                        let (r, _) = ui.allocate_exact_size(vec2(col_w, 16.0), Sense::hover());
-                        ui.painter().rect_filled(r, 0.0, theme::HEADER);
+                        let (r, _) = ui.allocate_exact_size(vec2(col_w, 20.0), Sense::hover());
+                        ui.painter().rect_filled(r, theme::CONTROL_RADIUS, theme::header());
                         ui.painter().text(
-                            r.left_center() + vec2(4.0, 0.0),
+                            r.left_center() + vec2(6.0, 0.0),
                             Align2::LEFT_CENTER,
                             g.label(),
-                            mono(11.5),
-                            AMBER,
+                            ui_font(12.0),
+                            text(),
                         );
                         let hdr = if *g == Group::Rates { "YIELD     CHG" } else { "LAST     NET CHG    %CHG" };
                         ui.painter().text(
@@ -122,7 +122,7 @@ pub fn wei(ui: &mut Ui, quotes: &HashMap<String, Quote>, updated: Option<&str>) 
                             Align2::RIGHT_CENTER,
                             hdr,
                             mono(10.5),
-                            AMBER_DIM,
+                            amber_dim(),
                         );
                         for l in catalog::group(*g) {
                             row(ui, l, quotes, &mut out, col_w);
@@ -145,15 +145,15 @@ pub fn tenor_label(years: f64) -> String {
 pub fn curve(ui: &mut Ui, curves: Option<&YieldCurves>) -> Vec<Action> {
     let mut out = Vec::new();
     let Some(c) = curves else {
-        ui.label(RichText::new("Loading US Treasury par yield curve (Treasury.gov)…").font(mono(12.0)).color(MUTED));
+        ui.label(RichText::new("Loading US Treasury par yield curve (Treasury.gov)…").font(mono(12.0)).color(muted()));
         return out;
     };
     let date =
         |t: i64| chrono::DateTime::from_timestamp(t, 0).map(|d| d.format("%d %b %Y").to_string()).unwrap_or_default();
     let lines: Vec<(&YieldCurve, Color32, String)> = [
-        Some((&c.current, AMBER, format!("Current {}", date(c.current.ts)))),
+        Some((&c.current, amber(), format!("Current {}", date(c.current.ts)))),
         c.month_ago.as_ref().map(|m| (m, Color32::from_gray(150), format!("1M ago {}", date(m.ts)))),
-        c.year_ago.as_ref().map(|y| (y, theme::DEM, format!("1Y ago {}", date(y.ts)))),
+        c.year_ago.as_ref().map(|y| (y, theme::dem(), format!("1Y ago {}", date(y.ts)))),
     ]
     .into_iter()
     .flatten()
@@ -181,24 +181,24 @@ pub fn curve(ui: &mut Ui, curves: Option<&YieldCurves>) -> Vec<Action> {
     let y_of = |v: f64| plot.bottom() - plot.height() * ((v - lo) / (hi - lo)) as f32;
     for t in tr_chart::scale::price_ticks(lo, hi, 6) {
         let y = y_of(t);
-        p.hline(plot.x_range(), y, Stroke::new(1.0, theme::GRID));
-        p.text(pos2(plot.right() + 6.0, y), Align2::LEFT_CENTER, format!("{t:.2}%"), mono(10.5), MUTED);
+        p.hline(plot.x_range(), y, Stroke::new(1.0, theme::grid()));
+        p.text(pos2(plot.right() + 6.0, y), Align2::LEFT_CENTER, format!("{t:.2}%"), mono(10.5), muted());
     }
     for (i, l) in tenors.iter().enumerate() {
         let x = x_of(i);
-        p.vline(x, plot.y_range(), Stroke::new(1.0, theme::GRID));
+        p.vline(x, plot.y_range(), Stroke::new(1.0, theme::grid()));
         p.text(
             pos2(x, plot.bottom() + 10.0),
             Align2::CENTER_CENTER,
             tenor_label(l.tenor_years.unwrap_or(0.0)),
             mono(10.5),
-            MUTED,
+            muted(),
         );
     }
     for (cv, col, _) in lines.iter().rev() {
         let pts: Vec<Pos2> =
             tenors.iter().enumerate().filter_map(|(i, l)| cv.get(l.ticker).map(|v| pos2(x_of(i), y_of(v)))).collect();
-        p.add(egui::Shape::line(pts.clone(), Stroke::new(if *col == AMBER { 2.2 } else { 1.4 }, *col)));
+        p.add(egui::Shape::line(pts.clone(), Stroke::new(if *col == amber() { 2.2 } else { 1.4 }, *col)));
         for q in pts {
             p.circle_filled(q, 2.6, *col);
         }
@@ -211,23 +211,24 @@ pub fn curve(ui: &mut Ui, curves: Option<&YieldCurves>) -> Vec<Action> {
     ui.label(
         RichText::new(" TENOR   YIELD   1M CHG(bp)  1Y CHG(bp)")
             .font(mono(11.5))
-            .color(AMBER)
-            .background_color(theme::HEADER),
+            .color(amber())
+            .background_color(theme::header()),
     );
     egui::ScrollArea::vertical().id_salt("curve-table").auto_shrink([false, false]).show(ui, |ui| {
         for l in &tenors {
             let cur = c.current.get(l.ticker);
             let m = c.month_ago.as_ref().and_then(|x| x.get(l.ticker));
             let y = c.year_ago.as_ref().and_then(|x| x.get(l.ticker));
-            let text = format!(
+            let line = format!(
                 " {:<6} {:>6}   {}      {}",
                 tenor_label(l.tenor_years.unwrap_or(0.0)),
                 cur.map(|v| format!("{v:.3}")).unwrap_or_default(),
                 bp(cur, m),
                 bp(cur, y)
             );
-            let r = ui
-                .add(egui::Label::new(RichText::new(text).font(mono(12.0)).color(TEXT)).extend().sense(Sense::click()));
+            let r = ui.add(
+                egui::Label::new(RichText::new(line).font(mono(12.0)).color(text())).extend().sense(Sense::click()),
+            );
             if r.clicked() {
                 out.push(Action::OpenChart(l.key()));
             }
@@ -245,7 +246,7 @@ pub fn curve(ui: &mut Ui, curves: Option<&YieldCurves>) -> Vec<Action> {
                 spread("US30Y", "US5Y")
             ))
             .font(mono(12.0))
-            .color(AMBER),
+            .color(amber()),
         );
     });
     out
@@ -267,7 +268,7 @@ pub fn merged_hits(query: &str, network: &[SearchHit]) -> Vec<SearchHit> {
 
 pub fn class_color(c: AssetClass) -> Color32 {
     match c {
-        AssetClass::Equity => TEXT,
+        AssetClass::Equity => text(),
         AssetClass::Etf => Color32::from_rgb(160, 200, 255),
         AssetClass::Index => Color32::from_rgb(255, 215, 120),
         AssetClass::Fx => Color32::from_rgb(120, 230, 200),
@@ -282,25 +283,27 @@ pub fn search(ui: &mut Ui, query: &mut String, network: &[SearchHit]) -> (Vec<Ac
     let mut out = Vec::new();
     let mut changed = false;
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Find:").font(mono(12.0)).color(MUTED));
+        ui.label(RichText::new("Find:").font(mono(12.0)).color(muted()));
         changed = ui.add(egui::TextEdit::singleline(query).font(mono(12.5)).desired_width(260.0)).changed();
         ui.label(
-            RichText::new("ticker or name · add CRNCY/GOVT/CMDTY/INDEX/EQUITY to filter").font(mono(11.0)).color(MUTED),
+            RichText::new("ticker or name · add CRNCY/GOVT/CMDTY/INDEX/EQUITY to filter")
+                .font(mono(11.0))
+                .color(muted()),
         );
     });
     ui.label(
         RichText::new(" MARKET KEY            CLASS   NAME")
             .font(mono(11.5))
-            .color(AMBER)
-            .background_color(theme::HEADER),
+            .color(amber())
+            .background_color(theme::header()),
     );
     let hits = merged_hits(query, network);
     if hits.is_empty() && !query.trim().is_empty() {
-        ui.label(RichText::new("No matches.").font(mono(12.0)).color(MUTED));
+        ui.label(RichText::new("No matches.").font(mono(12.0)).color(muted()));
     }
     egui::ScrollArea::vertical().id_salt("secf").auto_shrink([false, false]).show(ui, |ui| {
         for h in &hits {
-            let text = format!(
+            let line = format!(
                 " {:<20}  {:<6}  {}{}",
                 h.key,
                 h.class.label(),
@@ -308,7 +311,7 @@ pub fn search(ui: &mut Ui, query: &mut String, network: &[SearchHit]) -> (Vec<Ac
                 h.exchange.as_deref().map(|e| format!("  ({e})")).unwrap_or_default()
             );
             let r = ui.add(
-                egui::Label::new(RichText::new(text).font(mono(12.0)).color(class_color(h.class)))
+                egui::Label::new(RichText::new(line).font(mono(12.0)).color(class_color(h.class)))
                     .extend()
                     .sense(Sense::click()),
             );

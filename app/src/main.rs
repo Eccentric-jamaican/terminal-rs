@@ -1,6 +1,7 @@
 //! terminal-rs: a keyboard-driven, Bloomberg-style market terminal with GPU charts and
 //! congressional (STOCK Act) trade tracking.
 
+mod anim;
 mod app;
 mod chart_view;
 mod command;
@@ -8,6 +9,7 @@ mod congress_view;
 mod layout;
 mod markets_view;
 mod theme;
+mod widgets;
 mod worker;
 
 use std::time::Instant;
@@ -21,12 +23,30 @@ fn main() -> eframe::Result {
         )
         .init();
 
+    // MSAA smooths chart lines and drawings; 4x by default on macOS (TR_MSAA overrides).
+    let msaa: u16 = std::env::var("TR_MSAA")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n| matches!(n, 1 | 2 | 4 | 8))
+        .unwrap_or(if cfg!(target_os = "macos") { 4 } else { 1 });
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("terminal-rs")
+        .with_app_id("terminal-rs")
+        .with_inner_size([1600.0, 960.0])
+        .with_min_inner_size([900.0, 560.0]);
+    if cfg!(target_os = "macos") {
+        // Content extends under a transparent title bar; tr-macos adds the unified
+        // toolbar (inset traffic lights) and sidebar vibrancy on the first frame.
+        viewport = viewport
+            .with_transparent(true)
+            .with_fullsize_content_view(true)
+            .with_title_shown(false)
+            .with_titlebar_shown(false);
+    }
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
-        viewport: egui::ViewportBuilder::default()
-            .with_title("terminal-rs")
-            .with_inner_size([1600.0, 960.0])
-            .with_min_inner_size([800.0, 500.0]),
+        viewport,
+        multisampling: if msaa > 1 { msaa } else { 0 },
         ..Default::default()
     };
     eframe::run_native(
@@ -37,7 +57,7 @@ fn main() -> eframe::Result {
             rs.renderer.write().callback_resources.insert(tr_chart::gpu::ChartRenderer::new(
                 &rs.device,
                 rs.target_format,
-                1,
+                u32::from(msaa),
             ));
             let provider = tr_data::from_env();
             let name = provider.name().to_string();

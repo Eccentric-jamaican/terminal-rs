@@ -20,3 +20,7 @@ tracing-subscriber.workspace = true
 futures = "0.3"
 egui = "0.36"
 eframe = { version = "0.36", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }
+tr-macos.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+raw-window-handle = "0.6"

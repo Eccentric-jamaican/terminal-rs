@@ -6,7 +6,7 @@ use egui::{Color32, RichText, ScrollArea, Sense, Ui};
 use tr_congress::db::{Alert, PoliticianSummary};
 use tr_congress::{Chamber, Party, Trade, TxType};
 
-use crate::theme::{self, AMBER, MUTED, TEXT, mono};
+use crate::theme::{self, amber, mono, muted, text, ui_font};
 use crate::worker::Profile;
 
 /// What a click inside a panel asks the app to do.
@@ -16,6 +16,7 @@ pub enum Action {
     OpenTicker(String),
     OpenProfile(String),
     Track(String, bool),
+    AddToWatchlist(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -38,11 +39,11 @@ impl FeedFilter {
 
 fn tx_text(t: TxType) -> (&'static str, Color32) {
     match t {
-        TxType::Purchase => ("BUY ", theme::UP),
-        TxType::Sale => ("SELL", theme::DOWN),
-        TxType::SalePartial => ("SL-P", theme::DOWN),
-        TxType::Exchange => ("EXCH", MUTED),
-        TxType::Other => ("OTHR", MUTED),
+        TxType::Purchase => ("BUY ", theme::up()),
+        TxType::Sale => ("SELL", theme::down()),
+        TxType::SalePartial => ("SL-P", theme::down()),
+        TxType::Exchange => ("EXCH", muted()),
+        TxType::Other => ("OTHR", muted()),
     }
 }
 
@@ -71,7 +72,8 @@ fn plain(ui: &mut Ui, text: impl Into<String>, color: Color32) {
 /// Column header row; never wraps (narrow panes clip instead, like a terminal).
 fn header(ui: &mut Ui, text: &str) {
     ui.add(
-        egui::Label::new(RichText::new(text).font(mono(11.5)).color(AMBER).background_color(theme::HEADER)).extend(),
+        egui::Label::new(RichText::new(text).font(mono(11.5)).color(amber()).background_color(theme::header()))
+            .extend(),
     );
 }
 
@@ -86,46 +88,71 @@ fn trade_row(
 ) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
-        plain(ui, t.filed_date.format("%m/%d/%y").to_string(), MUTED);
-        plain(ui, t.tx_date.format("%m/%d/%y").to_string(), TEXT);
+        plain(ui, t.filed_date.format("%m/%d/%y").to_string(), muted());
+        plain(ui, t.tx_date.format("%m/%d/%y").to_string(), text());
         let lag = t.disclosure_lag_days();
-        plain(ui, format!("{lag:>3}d"), if lag > 45 { theme::DOWN } else { MUTED });
+        plain(ui, format!("{lag:>3}d"), if lag > 45 { theme::down() } else { muted() });
         if show_politician {
             let name = truncate(&t.politician, 22);
             let r = clickable(ui, name, theme::party_color(t.party));
             if r.clicked() {
                 out.push(Action::OpenProfile(t.politician.clone()));
             }
+            r.context_menu(|ui| {
+                if ui.button("Open Profile").clicked() {
+                    out.push(Action::OpenProfile(t.politician.clone()));
+                    ui.close();
+                }
+                if ui.button("Track Filings").clicked() {
+                    out.push(Action::Track(t.politician.clone(), true));
+                    ui.close();
+                }
+                if ui.button("Copy Disclosure Link").clicked() {
+                    ui.ctx().copy_text(t.source_url.clone());
+                    ui.close();
+                }
+            });
             plain(
                 ui,
                 format!("{}-{:<2}", t.party.code(), t.state.as_deref().unwrap_or("")),
                 theme::party_color(t.party),
             );
-            plain(ui, if t.chamber == Chamber::House { "H" } else { "S" }, MUTED);
+            plain(ui, if t.chamber == Chamber::House { "H" } else { "S" }, muted());
         }
         let (tx, c) = tx_text(t.tx_type);
         plain(ui, tx, c);
         if show_ticker {
             match &t.ticker {
                 Some(tk) => {
-                    let r = clickable(ui, format!("{tk:<6}"), AMBER);
+                    let r = clickable(ui, format!("{tk:<6}"), amber());
                     if r.clicked() {
                         out.push(Action::OpenChart(tk.clone()));
                     }
-                    if r.secondary_clicked() {
-                        out.push(Action::OpenTicker(tk.clone()));
-                    }
-                    r.on_hover_text("Click: chart · right-click: who in Congress traded it");
+                    let r = r.on_hover_text("Click: chart · right-click: more");
+                    r.context_menu(|ui| {
+                        if ui.button("Open Chart").clicked() {
+                            out.push(Action::OpenChart(tk.clone()));
+                            ui.close();
+                        }
+                        if ui.button(format!("Who in Congress Traded {tk}")).clicked() {
+                            out.push(Action::OpenTicker(tk.clone()));
+                            ui.close();
+                        }
+                        if ui.button("Add to Watchlist").clicked() {
+                            out.push(Action::AddToWatchlist(tk.clone()));
+                            ui.close();
+                        }
+                    });
                 }
-                None => plain(ui, "-     ", MUTED),
+                None => plain(ui, "-     ", muted()),
             }
         }
-        plain(ui, format!("{:<13}", t.amount.map(|a| a.to_string()).unwrap_or_else(|| "n/a".into())), TEXT);
+        plain(ui, format!("{:<13}", t.amount.map(|a| a.to_string()).unwrap_or_else(|| "n/a".into())), text());
         if let Some((s, c)) = extra {
             plain(ui, s, c);
         }
-        plain(ui, truncate(t.owner.as_deref().unwrap_or("Self"), 8), MUTED);
-        plain(ui, truncate(&t.asset_name, 40), MUTED);
+        plain(ui, truncate(t.owner.as_deref().unwrap_or("Self"), 8), muted());
+        plain(ui, truncate(&t.asset_name, 40), muted());
     });
 }
 
@@ -133,7 +160,7 @@ pub fn feed(ui: &mut Ui, trades: &[Trade], filter: &mut FeedFilter, status: &str
     let mut out = Vec::new();
     ui.horizontal(|ui| {
         let chip = |ui: &mut Ui, label: &str, on: bool| {
-            ui.selectable_label(on, RichText::new(label).font(mono(11.5))).clicked()
+            ui.selectable_label(on, RichText::new(label).font(ui_font(11.5))).clicked()
         };
         if chip(ui, "ALL", *filter == FeedFilter::default()) {
             *filter = FeedFilter::default();
@@ -156,12 +183,12 @@ pub fn feed(ui: &mut Ui, trades: &[Trade], filter: &mut FeedFilter, status: &str
         if chip(ui, "TICKERS", filter.tickers_only) {
             filter.tickers_only = !filter.tickers_only;
         }
-        plain(ui, status, MUTED);
+        plain(ui, status, muted());
     });
     header(ui, "FILED    TRADED   LAG  POLITICIAN             PTY  C  TYPE TICKER AMOUNT        OWNER    ASSET");
     let rows: Vec<&Trade> = trades.iter().filter(|t| filter.matches(t)).collect();
     if rows.is_empty() {
-        plain(ui, "No disclosures yet. Ingest runs in the background (REFRESH to force).", MUTED);
+        plain(ui, "No disclosures yet. Ingest runs in the background (REFRESH to force).", muted());
     }
     let row_h = 16.0;
     ScrollArea::both().id_salt("feed").auto_shrink([false, false]).show_rows(ui, row_h, rows.len(), |ui, range| {
@@ -184,7 +211,7 @@ pub fn ticker_trades(ui: &mut Ui, symbol: &str, trades: &[Trade]) -> Vec<Action>
     let sell_vol: f64 =
         trades.iter().filter(|t| t.tx_type.is_sell()).filter_map(|t| t.amount.map(|a| a.midpoint())).sum();
     ui.horizontal(|ui| {
-        let r = clickable(ui, format!("{symbol} US Equity"), AMBER);
+        let r = clickable(ui, format!("{symbol} US Equity"), amber());
         if r.clicked() {
             out.push(Action::OpenChart(symbol.to_string()));
         }
@@ -195,12 +222,12 @@ pub fn ticker_trades(ui: &mut Ui, symbol: &str, trades: &[Trade]) -> Vec<Action>
                 people.len(),
                 (buy_vol - sell_vol) / 1e6
             ),
-            TEXT,
+            text(),
         );
     });
     header(ui, "FILED    TRADED   LAG  POLITICIAN             PTY  C  TYPE AMOUNT        OWNER    ASSET");
     if trades.is_empty() {
-        plain(ui, format!("No congressional trades disclosed for {symbol}."), MUTED);
+        plain(ui, format!("No congressional trades disclosed for {symbol}."), muted());
     }
     ScrollArea::both().id_salt(("ticker", symbol)).auto_shrink([false, false]).show_rows(
         ui,
@@ -225,7 +252,7 @@ pub fn profile(ui: &mut Ui, query: &str, p: Option<&Profile>, loading: bool) -> 
             } else {
                 format!("No politician matches '{query}'. Try POL with a last name.")
             },
-            MUTED,
+            muted(),
         );
         return out;
     };
@@ -246,11 +273,11 @@ pub fn profile(ui: &mut Ui, query: &str, p: Option<&Profile>, loading: bool) -> 
                 pol.state.as_deref().unwrap_or(""),
                 pol.district.as_deref().map(|d| format!(" ({d})")).unwrap_or_default()
             ),
-            TEXT,
+            text(),
         );
         let label = if p.tracked { "★ TRACKED" } else { "☆ TRACK" };
         if ui
-            .button(RichText::new(label).font(mono(12.0)).color(AMBER))
+            .button(RichText::new(label).font(mono(12.0)).color(amber()))
             .on_hover_text("Alert me when this politician files a new trade")
             .clicked()
         {
@@ -258,14 +285,14 @@ pub fn profile(ui: &mut Ui, query: &str, p: Option<&Profile>, loading: bool) -> 
         }
     });
     let perf = &p.perf;
-    let ret_col = if perf.weighted_return >= 0.0 { theme::UP } else { theme::DOWN };
+    let ret_col = if perf.weighted_return >= 0.0 { theme::up() } else { theme::down() };
     ui.horizontal(|ui| {
-        plain(ui, format!("Trades {}", p.trades.len()), TEXT);
-        plain(ui, format!("Scored {}", perf.scored), MUTED);
+        plain(ui, format!("Trades {}", p.trades.len()), text());
+        plain(ui, format!("Scored {}", perf.scored), muted());
         ui.label(RichText::new(format!("Est. return {:+.1}%", perf.weighted_return * 100.0)).font(mono(12.0)).color(ret_col))
             .on_hover_text("Amount-weighted directional return from each trade date to today (buys long, sells short). Estimate: disclosures give value bands only.");
-        plain(ui, format!("Hit rate {:.0}%", perf.hit_rate * 100.0), TEXT);
-        plain(ui, format!("Avg lag {:.0}d", perf.avg_lag_days), if perf.avg_lag_days > 45.0 { theme::DOWN } else { MUTED });
+        plain(ui, format!("Hit rate {:.0}%", perf.hit_rate * 100.0), text());
+        plain(ui, format!("Avg lag {:.0}d", perf.avg_lag_days), if perf.avg_lag_days > 45.0 { theme::down() } else { muted() });
     });
     // Top tickers by count.
     let mut counts: std::collections::BTreeMap<&str, usize> = Default::default();
@@ -277,9 +304,9 @@ pub fn profile(ui: &mut Ui, query: &str, p: Option<&Profile>, loading: bool) -> 
     let mut top: Vec<(&str, usize)> = counts.into_iter().collect();
     top.sort_by_key(|t| std::cmp::Reverse(t.1));
     ui.horizontal_wrapped(|ui| {
-        plain(ui, "Most traded:", MUTED);
+        plain(ui, "Most traded:", muted());
         for (tk, n) in top.into_iter().take(12) {
-            if clickable(ui, format!("{tk}({n})"), AMBER).clicked() {
+            if clickable(ui, format!("{tk}({n})"), amber()).clicked() {
                 out.push(Action::OpenChart(tk.to_string()));
             }
         }
@@ -294,8 +321,8 @@ pub fn profile(ui: &mut Ui, query: &str, p: Option<&Profile>, loading: bool) -> 
             for t in &p.trades[range] {
                 let extra = ret_by_id
                     .get(&t.id)
-                    .map(|r| (format!("{:>+6.1}%", r * 100.0), if *r >= 0.0 { theme::UP } else { theme::DOWN }))
-                    .unwrap_or(("   n/a ".into(), MUTED));
+                    .map(|r| (format!("{:>+6.1}%", r * 100.0), if *r >= 0.0 { theme::up() } else { theme::down() }))
+                    .unwrap_or(("   n/a ".into(), muted()));
                 trade_row(ui, t, false, true, Some(extra), &mut out);
             }
         },
@@ -306,9 +333,9 @@ pub fn profile(ui: &mut Ui, query: &str, p: Option<&Profile>, loading: bool) -> 
 pub fn politicians(ui: &mut Ui, list: &[PoliticianSummary], search: &mut String) -> Vec<Action> {
     let mut out = Vec::new();
     ui.horizontal(|ui| {
-        plain(ui, "Search:", MUTED);
+        plain(ui, "Search:", muted());
         ui.add(egui::TextEdit::singleline(search).font(mono(12.0)).desired_width(180.0));
-        plain(ui, format!("{} politicians", list.len()), MUTED);
+        plain(ui, format!("{} politicians", list.len()), muted());
     });
     header(ui, "TRK POLITICIAN               PTY  ST  CH      TRADES  LAST FILED");
     let q = search.to_ascii_lowercase();
@@ -323,17 +350,17 @@ pub fn politicians(ui: &mut Ui, list: &[PoliticianSummary], search: &mut String)
                 let p = &s.politician;
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 8.0;
-                    if clickable(ui, if s.tracked { " ★ ".into() } else { " ☆ ".into() }, AMBER).clicked() {
+                    if clickable(ui, if s.tracked { " ★ ".into() } else { " ☆ ".into() }, amber()).clicked() {
                         out.push(Action::Track(p.id.to_string(), !s.tracked));
                     }
                     if clickable(ui, truncate(&p.name, 24), theme::party_color(p.party)).clicked() {
                         out.push(Action::OpenProfile(p.id.to_string()));
                     }
                     plain(ui, format!("{:<4}", p.party.code()), theme::party_color(p.party));
-                    plain(ui, format!("{:<3}", p.state.as_deref().unwrap_or("")), TEXT);
-                    plain(ui, format!("{:<7}", p.chamber.as_str()), MUTED);
-                    plain(ui, format!("{:>6}", s.trades), TEXT);
-                    plain(ui, s.last_filed.map(|d| d.to_string()).unwrap_or_default(), MUTED);
+                    plain(ui, format!("{:<3}", p.state.as_deref().unwrap_or("")), text());
+                    plain(ui, format!("{:<7}", p.chamber.as_str()), muted());
+                    plain(ui, format!("{:>6}", s.trades), text());
+                    plain(ui, s.last_filed.map(|d| d.to_string()).unwrap_or_default(), muted());
                 });
             }
         },
@@ -346,11 +373,11 @@ pub fn alerts(ui: &mut Ui, alerts: &[Alert]) -> (Vec<Action>, bool) {
     let mut mark_seen = false;
     ui.horizontal(|ui| {
         let unseen = alerts.iter().filter(|a| !a.seen).count();
-        plain(ui, format!("{unseen} unread"), if unseen > 0 { AMBER } else { MUTED });
+        plain(ui, format!("{unseen} unread"), if unseen > 0 { amber() } else { muted() });
         if ui.button(RichText::new("MARK READ").font(mono(11.5))).clicked() {
             mark_seen = true;
         }
-        plain(ui, "TRACK <name> to get alerts when a politician files a new PTR", MUTED);
+        plain(ui, "TRACK <name> to get alerts when a politician files a new PTR", muted());
     });
     header(ui, "TIME              POLITICIAN               MESSAGE");
     ScrollArea::vertical().id_salt("alerts").auto_shrink([false, false]).show(ui, |ui| {
@@ -359,11 +386,11 @@ pub fn alerts(ui: &mut Ui, alerts: &[Alert]) -> (Vec<Action>, bool) {
                 let ts = chrono::DateTime::from_timestamp(a.created_at, 0)
                     .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
                     .unwrap_or_default();
-                plain(ui, ts, if a.seen { MUTED } else { AMBER });
-                if clickable(ui, truncate(&a.politician, 24), TEXT).clicked() {
+                plain(ui, ts, if a.seen { muted() } else { amber() });
+                if clickable(ui, truncate(&a.politician, 24), text()).clicked() {
                     out.push(Action::OpenProfile(a.politician_id.to_string()));
                 }
-                plain(ui, &a.message, if a.seen { MUTED } else { TEXT });
+                plain(ui, &a.message, if a.seen { muted() } else { text() });
             });
         }
     });

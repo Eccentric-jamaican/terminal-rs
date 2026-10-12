@@ -77,6 +77,14 @@ systems**.
   - **Alerts**: `TRACK <name>` (or ☆ in the directory/profile); when a tracked politician files a
     new PTR you get a toast, an `ALERTS n` badge and an entry in `ALERTS`.
 
+- **Native macOS feel** while keeping Bloomberg density and the command line: transparent title
+  bar with the traffic lights inset in a unified toolbar, a translucent source-list sidebar with
+  window vibrancy (`NSVisualEffectView` via `objc2`, in `crates/macos`) for the watchlist,
+  markets and Congress, SF Pro for chrome and SF Mono for numbers, rounded cards, segmented
+  controls with a sliding pill, spring animations (SwiftUI-style response/damping), hover states
+  and context menus (chart, watchlist, feed rows). Light/dark follows the system appearance and
+  the system accent colour; charts render at native retina scale with 4x MSAA.
+
 ![Congress marker hover card with disclosure lag](docs/img/hover-card.png)
 
 ## Running
@@ -92,6 +100,11 @@ Data lives in `~/Library/Application Support/terminal-rs` (macOS) or
 current and previous year (a few minutes; it runs in the background while you work).
 `cargo run -p tr-congress --example ingest -- congress.sqlite3` runs one ingest from the CLI.
 
+Appearance: `TR_THEME=light|dark` overrides the system appearance, `TR_MSAA=1|2|4|8` sets
+chart anti-aliasing (default 4 on macOS), `TR_VIBRANCY=0` disables the translucent sidebar, and
+⌃⌘S (Ctrl+S elsewhere) toggles the sidebar. `scripts/bundle-macos.sh` builds a retina-capable
+`terminal-rs.app`.
+
 Press **F1** (or type `HELP`) for the full command and hotkey list. Highlights:
 
 | Input | Action |
@@ -106,6 +119,7 @@ Press **F1** (or type `HELP`) for the full command and hotkey list. Highlights:
 | wheel / drag / drag axes / double-click | zoom / pan / stretch / reset |
 | Alt+T/H/V/F · Alt+R · Alt+L · Esc · Del | draw · reset view · log · cancel · delete drawing |
 | F1–F6 · Tab · F12 | help, CONG, POL, ALRT, WL, SYNC · next pane · frame-time readout |
+| right-click chart / watchlist / feed row | context menu (chart type, indicators, draw, add to watchlist, who traded it) |
 
 ## Architecture
 
@@ -186,9 +200,9 @@ cargo bench -p tr-core && cargo bench -p tr-chart
 
 - macOS is the primary target (wgpu Metal backend); Linux works with Vulkan or GL. This repository
   was developed and run on Linux (X11, software Vulkan). For macOS, the GPU and UI stack (`tr-core`,
-  `tr-chart`, eframe/winit) was cross-checked for `aarch64-apple-darwin`; the full app could not be
-  built here because the bundled SQLite C library needs the Apple SDK, so it has not yet been run on
-  a Mac.
+  `tr-chart`, `tr-macos`, eframe/winit) is cross-checked for `aarch64-apple-darwin`, and CI
+  (`.github/workflows/ci.yml`) builds, tests, lints and launches the app with screenshots on macOS
+  arm64 and Intel runners.
 - Scanned paper filings (some House PTRs and Senate `/paper/` reports) are recorded and alerted but
   not OCR'd, so their trades are not itemised.
 - Estimated performance uses disclosed value bands (midpoints), so it is an estimate of trade-level

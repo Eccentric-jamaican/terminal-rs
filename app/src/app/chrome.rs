@@ -1,0 +1,663 @@
+//! Window chrome in the style of a SwiftUI macOS app: a unified toolbar holding the
+//! command line, a translucent (vibrancy) sidebar, rounded pane cards and a status bar.
+
+use std::time::Instant;
+
+use egui::{
+    Align2, Color32, CornerRadius, CursorIcon, Id, Key, Modifiers, Rect, RichText, Sense, Shadow, Stroke, StrokeKind,
+    Ui, UiBuilder, ViewportCommand, pos2, vec2,
+};
+use tr_data::SearchHit;
+
+use super::{PaneKind, TerminalApp};
+use crate::anim;
+use crate::command::{self, Function};
+use crate::congress_view::Action;
+use crate::layout::Layout;
+use crate::markets_view;
+use crate::theme::{self, amber, mono, muted, text, ui_font};
+use crate::widgets::{self, Icon};
+
+/// Toolbar height; on macOS it matches a unified `NSToolbar` so the traffic lights centre in it.
+pub const TOOLBAR_H: f32 = if cfg!(target_os = "macos") { tr_macos::TITLEBAR_HEIGHT } else { 44.0 };
+/// Space kept clear for the traffic lights when the sidebar is collapsed.
+pub const TRAFFIC_INSET: f32 = if cfg!(target_os = "macos") { tr_macos::TRAFFIC_LIGHTS_WIDTH } else { 0.0 };
+pub const STATUS_H: f32 = 24.0;
+pub const SIDEBAR_W: f32 = 232.0;
+pub const PANE_TITLE_H: f32 = 26.0;
+pub const GAP: f32 = 6.0;
+const ROW_H: f32 = 24.0;
+const MAC: bool = cfg!(target_os = "macos");
+
+/// What a sidebar click asks the app to do.
+pub enum SidebarCmd {
+    Action(Action),
+    Function(Function),
+}
+
+/// Make `rect` behave like a title bar: drag moves the window, double-click zooms it.
+fn window_drag_region(ui: &Ui, rect: Rect, salt: &str) {
+    let r = ui.interact(rect, Id::new(("drag-region", salt)), Sense::click_and_drag());
+    if r.drag_started() {
+        ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
+    }
+    if r.double_clicked() {
+        let maximized = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
+        ui.ctx().send_viewport_cmd(ViewportCommand::Maximized(!maximized));
+    }
+}
+
+impl TerminalApp {
+    // ---- toolbar -------------------------------------------------------------------------
+
+    /// Unified toolbar: sidebar toggle, title, command line, layout picker, actions, clock.
+    /// Returns whether the command line has focus.
+    pub(super) fn toolbar(&mut self, ui: &mut Ui, rect: Rect, left_inset: f32) -> bool {
+        window_drag_region(ui, rect, "toolbar");
+        let p = ui.painter_at(rect);
+        p.hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, theme::border()));
+        let cy = rect.center().y;
+        let mut x = rect.left() + left_inset + 8.0;
+
+        // Sidebar toggle.
+        let mut tb = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(pos2(x, cy - 13.0), vec2(30.0, 26.0))));
+        if widgets::icon_button(
+            &mut tb,
+            Icon::Sidebar,
+            if MAC { "Toggle Sidebar (⌃⌘S)" } else { "Toggle Sidebar (Ctrl+S)" },
+            false,
+        )
+        .clicked()
+        {
+            self.sidebar_open = !self.sidebar_open;
+        }
+        x += 38.0;
+
+        // Window title, macOS toolbar style.
+        let title = p.layout_no_wrap("terminal-rs".into(), ui_font(13.5), text());
+        let subtitle = p.layout_no_wrap(self.provider_label(), ui_font(10.5), muted());
+        let tw = title.size().x.max(subtitle.size().x);
+        p.galley(pos2(x, cy - 15.0), title, text());
+        p.galley(pos2(x, cy + 1.0), subtitle, muted());
+        x += tw + 16.0;
+
+        // Right-hand cluster, laid out from the right edge.
+        let now = chrono::Local::now();
+        let clock = p.layout_no_wrap(now.format("%a %d %b  %H:%M:%S").to_string(), mono(12.0), text());
+        let utc = p.layout_no_wrap(format!("{} UTC", chrono::Utc::now().format("%H:%M")), mono(10.5), muted());
+        let cw = clock.size().x.max(utc.size().x);
+        let mut right = rect.right() - 12.0;
+        p.galley(pos2(right - clock.size().x, cy - 14.0), clock, text());
+        p.galley(pos2(right - utc.size().x, cy + 2.0), utc, muted());
+        right -= cw + 12.0;
+
+        let unread = self.alerts.iter().filter(|a| !a.seen).count();
+        let buttons: [(Icon, &str, bool); 3] = [
+            (Icon::Gauge, "Frame Timing (F12)", self.show_perf),
+            (Icon::Bell, "Alerts (F4)", unread > 0),
+            (Icon::Refresh, "Refresh Congress Filings (F6)", false),
+        ];
+        for (icon, tip, active) in buttons {
+            right -= 32.0;
+            let r = Rect::from_min_size(pos2(right, cy - 13.0), vec2(30.0, 26.0));
+            let mut b = ui.new_child(UiBuilder::new().max_rect(r));
+            let resp = widgets::icon_button(&mut b, icon, tip, active);
+            if icon == Icon::Bell && unread > 0 {
+                let c = pos2(r.right() - 7.0, r.top() + 6.0);
+                p.circle_filled(c, 6.5, theme::down());
+                p.text(c, Align2::CENTER_CENTER, unread.min(99).to_string(), ui_font(8.5), Color32::WHITE);
+            }
+            if resp.clicked() {
+                match icon {
+                    Icon::Gauge => self.show_perf = !self.show_perf,
+                    Icon::Bell => self.apply(Function::Alerts),
+                    _ => {
+                        self.apply(Function::Refresh);
+                        self.status = "Refreshing congressional filings…".into();
+                    }
+                }
+            }
+        }
+        right -= 10.0;
+
+        // Layout picker.
+        let labels: Vec<&str> = Layout::ALL.iter().map(|l| l.label()).collect();
+        let seg_w = labels
+            .iter()
+            .map(|l| p.layout_no_wrap((*l).to_string(), ui_font(11.5), text()).size().x + 16.0)
+            .sum::<f32>()
+            + 4.0;
+        let show_layout = right - seg_w - x > 320.0;
+        if show_layout {
+            right -= seg_w;
+            let r = Rect::from_min_size(pos2(right, cy - 12.0), vec2(seg_w, 24.0));
+            let mut s = ui.new_child(UiBuilder::new().max_rect(r));
+            let sel = Layout::ALL.iter().position(|l| *l == self.layout);
+            if let Some(i) = widgets::segmented(&mut s, "layout", &labels, sel, 24.0) {
+                self.layout = Layout::ALL[i];
+                self.fit_panes_to_layout();
+            }
+            s.interact(r, Id::new("layout-tip"), Sense::hover()).on_hover_text("Pane layout (LAYOUT 1|2|2H|3|4|6)");
+            right -= 12.0;
+        }
+
+        let field = Rect::from_min_max(pos2(x, cy - 14.0), pos2(right.max(x + 160.0).min(x + 860.0), cy + 14.0));
+        self.command_field(ui, field)
+    }
+
+    fn provider_label(&self) -> String {
+        let n = self.provider.to_lowercase();
+        if n.contains("sample") { "Offline · sample data".into() } else { format!("Live · {}", self.provider) }
+    }
+
+    /// The Bloomberg command line, drawn as a rounded macOS search field.
+    fn command_field(&mut self, ui: &mut Ui, field: Rect) -> bool {
+        let suggestions = self.suggestions();
+        // Claim navigation keys for the dropdown before the text field sees them.
+        let (sel_down, sel_up, complete) = if suggestions.is_empty() {
+            (false, false, false)
+        } else {
+            ui.input_mut(|i| {
+                (
+                    i.consume_key(Modifiers::NONE, Key::ArrowDown),
+                    i.consume_key(Modifiers::NONE, Key::ArrowUp),
+                    i.consume_key(Modifiers::NONE, Key::Tab),
+                )
+            })
+        };
+        if sel_down {
+            self.suggestion = Some(self.suggestion.map_or(0, |i| (i + 1).min(suggestions.len() - 1)));
+        }
+        if sel_up {
+            self.suggestion = self.suggestion.and_then(|i| i.checked_sub(1));
+        }
+        if complete {
+            let pick = &suggestions[self.suggestion.unwrap_or(0)];
+            self.cmd = format!("{} ", pick.key);
+            self.suggestion = None;
+            self.focus_cmd = true;
+        }
+
+        let id = Id::new("command-line");
+        let had_focus = ui.ctx().memory(|m| m.has_focus(id));
+        let ring = anim::spring_bool(ui.ctx(), id.with("ring"), had_focus);
+        let p = ui.painter();
+        let radius = CornerRadius::same(8);
+        if ring > 0.01 {
+            p.rect_stroke(
+                field.expand(2.0),
+                CornerRadius::same(10),
+                Stroke::new(3.0, theme::accent().gamma_multiply(0.45 * ring)),
+                StrokeKind::Outside,
+            );
+        }
+        p.rect_filled(field, radius, theme::control());
+        p.rect_stroke(field, radius, Stroke::new(1.0, theme::border()), StrokeKind::Inside);
+        widgets::draw_icon(
+            p,
+            Rect::from_center_size(pos2(field.left() + 15.0, field.center().y), vec2(16.0, 16.0)),
+            Icon::Search,
+            muted(),
+        );
+        // A small "GO" key cap at the trailing edge, Bloomberg-style.
+        let go = Rect::from_center_size(pos2(field.right() - 22.0, field.center().y), vec2(32.0, 18.0));
+        p.rect_filled(go, 4.0, if self.cmd.trim().is_empty() { theme::control_hover() } else { amber() });
+        p.text(
+            go.center(),
+            Align2::CENTER_CENTER,
+            "GO",
+            mono(10.5),
+            if self.cmd.trim().is_empty() { muted() } else { Color32::BLACK },
+        );
+        let go_clicked = ui.interact(go, id.with("go"), Sense::click()).on_hover_text("<GO> (Enter)").clicked();
+
+        let inner = Rect::from_min_max(pos2(field.left() + 28.0, field.top()), pos2(go.left() - 6.0, field.bottom()));
+        let mut child = ui.new_child(UiBuilder::new().max_rect(inner));
+        let te = egui::TextEdit::singleline(&mut self.cmd)
+            .id(id)
+            .font(mono(13.5))
+            .text_color(amber())
+            .vertical_align(egui::Align::Center)
+            .hint_text(
+                RichText::new("Search or type a command — BTCUSD <CRNCY> · US10Y GOVT · CL1 CMDTY · AAPL · WEI · GC")
+                    .font(ui_font(13.0))
+                    .color(muted()),
+            )
+            .desired_width(inner.width())
+            .min_size(vec2(inner.width(), inner.height()))
+            .frame(egui::Frame::NONE);
+        let resp = child.add(te.lock_focus(true));
+        if resp.changed() {
+            self.suggestion = None;
+            let q = self.cmd.trim().to_string();
+            if q.len() >= 2 && !self.suggestions().is_empty() {
+                self.search_pending = Some((q, Instant::now()));
+            }
+        }
+        if self.focus_cmd {
+            resp.request_focus();
+            // Place the cursor at the end after type-to-command.
+            if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), id) {
+                let ccursor = egui::text::CCursor::new(self.cmd.chars().count());
+                state.cursor.set_char_range(Some(egui::text::CCursorRange::one(ccursor)));
+                state.store(ui.ctx(), id);
+            }
+            self.focus_cmd = false;
+        }
+        let focused = resp.has_focus();
+        let (enter, esc, up, down) = ui.input(|i| {
+            (
+                i.key_pressed(Key::Enter),
+                i.key_pressed(Key::Escape),
+                i.key_pressed(Key::ArrowUp),
+                i.key_pressed(Key::ArrowDown),
+            )
+        });
+        if (resp.lost_focus() && enter) || go_clicked {
+            let input = std::mem::take(&mut self.cmd);
+            match self.suggestion.take().and_then(|i| suggestions.get(i)) {
+                Some(pick) => self.execute(&pick.key),
+                None if !input.trim().is_empty() => self.execute(&input),
+                None => {}
+            }
+            self.cmd_hist_pos = None;
+            // The command line stays live, Bloomberg-style.
+            self.focus_cmd = true;
+        } else if (focused || resp.lost_focus()) && esc {
+            self.cmd.clear();
+            resp.surrender_focus();
+        } else if focused && (up || down) && !self.cmd_history.is_empty() {
+            let n = self.cmd_history.len();
+            let pos = match (self.cmd_hist_pos, up) {
+                (None, true) => n - 1,
+                (Some(p), true) => p.saturating_sub(1),
+                (Some(p), false) if p + 1 < n => p + 1,
+                _ => {
+                    self.cmd_hist_pos = None;
+                    self.cmd.clear();
+                    return focused;
+                }
+            };
+            self.cmd_hist_pos = Some(pos);
+            self.cmd = self.cmd_history[pos].clone();
+        }
+        if focused && !self.cmd.is_empty() {
+            self.dropdown(ui.ctx(), field, &suggestions);
+        }
+        focused
+    }
+
+    /// Security suggestions for what is typed, unless it is a function command.
+    pub(super) fn suggestions(&self) -> Vec<SearchHit> {
+        let q = self.cmd.trim();
+        if q.is_empty()
+            || matches!(command::parse(q), Some(command::Command::Function(_) | command::Command::SymbolFunction(..)))
+        {
+            return Vec::new();
+        }
+        let net: &[SearchHit] = if self.net_hits.0 == q { &self.net_hits.1 } else { &[] };
+        let mut v = markets_view::merged_hits(q, net);
+        v.truncate(8);
+        v
+    }
+
+    /// Autocomplete popover under the command field.
+    fn dropdown(&mut self, ctx: &egui::Context, below: Rect, hits: &[SearchHit]) {
+        if hits.is_empty() {
+            return;
+        }
+        let mut clicked = None;
+        let width = below.width().clamp(420.0, 680.0);
+        egui::Area::new(Id::new("cmd-suggestions"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(below.left_bottom() + vec2(0.0, 6.0))
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(theme::card())
+                    .stroke(Stroke::new(1.0, theme::border()))
+                    .corner_radius(CornerRadius::same(theme::CARD_RADIUS))
+                    .shadow(Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(70) })
+                    .inner_margin(6.0)
+                    .show(ui, |ui| {
+                        ui.set_width(width);
+                        for (i, h) in hits.iter().enumerate() {
+                            let (r, resp) = ui.allocate_exact_size(vec2(width, 26.0), Sense::click());
+                            let selected = self.suggestion == Some(i);
+                            widgets::hover_wash(ui, r, &resp, selected);
+                            let p = ui.painter();
+                            let class_c = markets_view::class_color(h.class);
+                            let pill = Rect::from_min_size(pos2(r.left() + 6.0, r.center().y - 8.0), vec2(52.0, 16.0));
+                            p.rect_filled(pill, 8.0, class_c.gamma_multiply(0.18));
+                            p.text(pill.center(), Align2::CENTER_CENTER, h.class.label(), ui_font(10.0), class_c);
+                            p.text(
+                                pos2(pill.right() + 10.0, r.center().y),
+                                Align2::LEFT_CENTER,
+                                &h.key,
+                                mono(12.5),
+                                text(),
+                            );
+                            p.text(
+                                pos2(pill.right() + 190.0, r.center().y),
+                                Align2::LEFT_CENTER,
+                                &h.name,
+                                ui_font(12.5),
+                                muted(),
+                            );
+                            if resp.hovered() {
+                                ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                            }
+                            if resp.clicked() {
+                                clicked = Some(h.key.clone());
+                            }
+                        }
+                        ui.add_space(2.0);
+                        ui.label(
+                            RichText::new(if MAC {
+                                "↑ ↓ select   ⇥ complete   ↩ load"
+                            } else {
+                                "Up/Down select   Tab complete   Enter load"
+                            })
+                            .font(ui_font(10.5))
+                            .color(muted()),
+                        );
+                    });
+            });
+        if let Some(key) = clicked {
+            self.cmd.clear();
+            self.suggestion = None;
+            self.execute(&key);
+            self.focus_cmd = true;
+        }
+    }
+
+    // ---- sidebar -------------------------------------------------------------------------
+
+    /// Source-list sidebar: watchlist, markets and Congress sections. `rect` is the full
+    /// sidebar (it slides in from the left, so it may extend past the window edge).
+    pub(super) fn sidebar(&mut self, ui: &mut Ui, rect: Rect) -> Vec<SidebarCmd> {
+        let mut out = Vec::new();
+        let p = ui.painter();
+        p.rect_filled(rect, 0.0, theme::sidebar());
+        p.vline(rect.right() - 0.5, rect.y_range(), Stroke::new(1.0, theme::border()));
+        let head = Rect::from_min_size(rect.min, vec2(rect.width(), TOOLBAR_H));
+        window_drag_region(ui, head, "sidebar");
+        if !cfg!(target_os = "macos") {
+            p.text(head.left_center() + vec2(14.0, 0.0), Align2::LEFT_CENTER, "TERMINAL-RS", mono(12.5), amber());
+        }
+
+        let body = Rect::from_min_max(pos2(rect.left(), head.bottom()), rect.max);
+        let mut child = ui.new_child(UiBuilder::new().max_rect(body.shrink2(vec2(8.0, 0.0))).id_salt("sidebar"));
+        child.set_clip_rect(body.intersect(ui.clip_rect()));
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(&mut child, |ui| {
+            ui.spacing_mut().item_spacing.y = 1.0;
+            let focused = self.panes.get(self.focus).map(|p| std::mem::discriminant(&p.kind));
+            let is_focused = |k: &PaneKind| focused == Some(std::mem::discriminant(k));
+
+            section(ui, "Watchlist");
+            let mut remove = None;
+            for key in &self.watchlist {
+                let sec = tr_data::security(key);
+                let resp = row_frame(ui, false);
+                let r = resp.rect;
+                let pt = ui.painter();
+                pt.text(pos2(r.left() + 8.0, r.center().y), Align2::LEFT_CENTER, &sec.ticker, mono(12.0), text());
+                if let Some(q) = self.quotes.get(key) {
+                    let up = q.change() >= 0.0;
+                    let c = if up { theme::up() } else { theme::down() };
+                    let pct = format!("{:+.2}%", q.change_pct());
+                    let pill = Rect::from_min_size(pos2(r.right() - 62.0, r.center().y - 8.0), vec2(58.0, 16.0));
+                    pt.rect_filled(pill, 4.0, c.gamma_multiply(0.16));
+                    pt.text(pill.right_center() - vec2(5.0, 0.0), Align2::RIGHT_CENTER, pct, mono(11.0), c);
+                    let d = sec.decimals(q.last);
+                    pt.text(
+                        pos2(pill.left() - 8.0, r.center().y),
+                        Align2::RIGHT_CENTER,
+                        format!("{:.d$}", q.last),
+                        mono(11.5),
+                        text(),
+                    );
+                } else {
+                    pt.text(
+                        pos2(r.right() - 8.0, r.center().y),
+                        Align2::RIGHT_CENTER,
+                        sec.class.yellow_key().label(),
+                        ui_font(10.5),
+                        muted(),
+                    );
+                }
+                if resp.clicked() {
+                    out.push(SidebarCmd::Action(Action::OpenChart(key.clone())));
+                }
+                let resp = resp.on_hover_text(format!("{} — {}", sec.key(), sec.name().unwrap_or(&sec.ticker)));
+                resp.context_menu(|ui| {
+                    if ui.button("Open Chart").clicked() {
+                        out.push(SidebarCmd::Action(Action::OpenChart(key.clone())));
+                        ui.close();
+                    }
+                    if sec.has_congress_trades() && ui.button("Who in Congress Traded This").clicked() {
+                        out.push(SidebarCmd::Action(Action::OpenTicker(sec.ticker.clone())));
+                        ui.close();
+                    }
+                    if ui.button("Compare on Chart").clicked() {
+                        out.push(SidebarCmd::Function(Function::Compare(Some(key.clone()))));
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Remove from Watchlist").clicked() {
+                        remove = Some(key.clone());
+                        ui.close();
+                    }
+                });
+            }
+            if let Some(k) = remove {
+                self.watchlist.retain(|x| *x != k);
+            }
+            if nav_row(ui, Icon::List, "Open Watchlist Pane", None, is_focused(&PaneKind::Watchlist)).clicked() {
+                out.push(SidebarCmd::Function(Function::Watchlist));
+            }
+
+            section(ui, "Markets");
+            let items = [
+                (Icon::Globe, "World Markets", "WEI", Function::Wei, PaneKind::Wei),
+                (Icon::Curve, "Yield Curve", "GC", Function::Curve, PaneKind::Curve),
+                (
+                    Icon::Search,
+                    "Security Search",
+                    "SECF",
+                    Function::Search(String::new()),
+                    PaneKind::Search { query: String::new() },
+                ),
+            ];
+            for (icon, label, code, f, kind) in items {
+                if nav_row(ui, icon, label, Some(code), is_focused(&kind)).clicked() {
+                    out.push(SidebarCmd::Function(f));
+                }
+            }
+
+            section(ui, "Congress");
+            let unread = self.alerts.iter().filter(|a| !a.seen).count();
+            if nav_row(ui, Icon::List, "Latest Trades", Some("CONG"), is_focused(&PaneKind::Feed)).clicked() {
+                out.push(SidebarCmd::Function(Function::Congress));
+            }
+            if nav_row(ui, Icon::People, "Politicians", Some("POL"), is_focused(&PaneKind::Politicians)).clicked() {
+                out.push(SidebarCmd::Function(Function::Politician(String::new())));
+            }
+            let badge = (unread > 0).then(|| unread.to_string());
+            if nav_row(ui, Icon::Bell, "Alerts", badge.as_deref().or(Some("ALRT")), is_focused(&PaneKind::Alerts))
+                .clicked()
+            {
+                out.push(SidebarCmd::Function(Function::Alerts));
+            }
+            let tracked: Vec<_> = self.politicians.iter().filter(|s| s.tracked).collect();
+            if !tracked.is_empty() {
+                section(ui, "Tracked");
+                for s in tracked {
+                    let resp = row_frame(ui, false);
+                    let r = resp.rect;
+                    let pt = ui.painter();
+                    let pol = &s.politician;
+                    pt.circle_filled(pos2(r.left() + 12.0, r.center().y), 4.0, theme::party_color(pol.party));
+                    pt.text(pos2(r.left() + 24.0, r.center().y), Align2::LEFT_CENTER, &pol.name, ui_font(12.5), text());
+                    pt.text(
+                        pos2(r.right() - 8.0, r.center().y),
+                        Align2::RIGHT_CENTER,
+                        s.trades.to_string(),
+                        mono(11.0),
+                        muted(),
+                    );
+                    if resp.clicked() {
+                        out.push(SidebarCmd::Action(Action::OpenProfile(pol.name.clone())));
+                    }
+                    resp.context_menu(|ui| {
+                        if ui.button("Open Profile").clicked() {
+                            out.push(SidebarCmd::Action(Action::OpenProfile(pol.name.clone())));
+                            ui.close();
+                        }
+                        if ui.button("Stop Tracking").clicked() {
+                            out.push(SidebarCmd::Action(Action::Track(pol.name.clone(), false)));
+                            ui.close();
+                        }
+                    });
+                }
+            }
+
+            section(ui, "Help");
+            if nav_row(ui, Icon::Star, "Commands & Hotkeys", Some("F1"), is_focused(&PaneKind::Help)).clicked() {
+                out.push(SidebarCmd::Function(Function::Help));
+            }
+            ui.add_space(12.0);
+        });
+        out
+    }
+
+    // ---- panes and status ----------------------------------------------------------------
+
+    /// Rounded card with a title row; returns the content rect.
+    pub(super) fn pane_card(ui: &Ui, rect: Rect, title: &str, focused: bool, id: u64) -> Rect {
+        let focus = anim::spring_bool(ui.ctx(), Id::new(("pane-focus", id)), focused);
+        let inner = widgets::card(ui, rect, focus);
+        let p = ui.painter_at(rect);
+        let bar = Rect::from_min_size(inner.min, vec2(inner.width(), PANE_TITLE_H));
+        let (code, rest) = title.split_once("  ").unwrap_or(("", title));
+        let mut x = bar.left() + 10.0;
+        if !code.is_empty() {
+            let g = p.layout_no_wrap(code.to_string(), mono(11.0), amber());
+            let chip = Rect::from_min_size(pos2(x, bar.center().y - 8.0), vec2(g.size().x + 10.0, 16.0));
+            p.rect_filled(chip, 4.0, theme::amber().gamma_multiply(0.14));
+            p.galley(pos2(x + 5.0, bar.center().y - g.size().y / 2.0), g, amber());
+            x = chip.right() + 8.0;
+        }
+        p.text(pos2(x, bar.center().y), Align2::LEFT_CENTER, rest, ui_font(12.5), text());
+        p.hline(bar.x_range(), bar.bottom(), Stroke::new(1.0, theme::border()));
+        Rect::from_min_max(
+            pos2(inner.left() + 8.0, bar.bottom() + 4.0),
+            pos2(inner.right() - 8.0, inner.bottom() - 4.0),
+        )
+    }
+
+    pub(super) fn status_bar(&self, ui: &Ui, rect: Rect) {
+        let p = ui.painter_at(rect);
+        p.hline(rect.x_range(), rect.top() + 0.5, Stroke::new(1.0, theme::border()));
+        let cy = rect.center().y;
+        let mut x = rect.left() + 10.0;
+        if self.cmd.trim().is_empty() {
+            let keys = [
+                ("F1", "Help"),
+                ("F2", "Congress"),
+                ("F3", "Politicians"),
+                ("F4", "Alerts"),
+                ("F5", "Watchlist"),
+                ("Tab", "Next Pane"),
+                (if MAC { "⌥T H V F" } else { "Alt+T H V F" }, "Draw"),
+                (if MAC { "⌥R" } else { "Alt+R" }, "Reset"),
+            ];
+            for (k, label) in keys {
+                let g = p.layout_no_wrap(k.to_string(), mono(10.0), text());
+                let cap = Rect::from_min_size(pos2(x, cy - 8.0), vec2(g.size().x + 8.0, 16.0));
+                p.rect_filled(cap, 4.0, theme::control());
+                p.rect_stroke(cap, 4.0, Stroke::new(1.0, theme::border()), StrokeKind::Inside);
+                p.galley(pos2(x + 4.0, cy - g.size().y / 2.0), g, text());
+                x = cap.right() + 5.0;
+                let g = p.layout_no_wrap(label.to_string(), ui_font(11.0), muted());
+                p.galley(pos2(x, cy - g.size().y / 2.0), g.clone(), muted());
+                x += g.size().x + 12.0;
+            }
+        } else {
+            p.text(pos2(x, cy), Align2::LEFT_CENTER, command::hint(&self.cmd), mono(11.0), text());
+        }
+        let status = if self.show_perf {
+            format!(
+                "UI {:.2} ms · frame {:.1} ms ({:.0} fps) · {}",
+                self.perf_cpu_ms,
+                self.perf_dt_ms,
+                1000.0 / self.perf_dt_ms.max(0.1),
+                self.status
+            )
+        } else {
+            self.status.clone()
+        };
+        p.text(pos2(rect.right() - 10.0, cy), Align2::RIGHT_CENTER, status, ui_font(11.5), muted());
+    }
+
+    pub(super) fn toasts(&self, ctx: &egui::Context) {
+        let screen = ctx.content_rect();
+        let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, Id::new("toasts")));
+        for (k, (msg, at)) in self.toasts.iter().enumerate() {
+            let slide = anim::spring(ctx, Id::new(("toast", k, *at)), 0.0);
+            let r = Rect::from_min_size(
+                pos2(screen.right() - 432.0 + slide, screen.top() + TOOLBAR_H + 10.0 + k as f32 * 58.0),
+                vec2(420.0, 50.0),
+            );
+            widgets::card_on(&p, r, 0.0);
+            widgets::draw_icon(
+                &p,
+                Rect::from_center_size(pos2(r.left() + 22.0, r.center().y), vec2(18.0, 18.0)),
+                Icon::Bell,
+                amber(),
+            );
+            p.text(pos2(r.left() + 42.0, r.top() + 15.0), Align2::LEFT_CENTER, "Congress Alert", ui_font(12.5), text());
+            p.text(pos2(r.left() + 42.0, r.top() + 33.0), Align2::LEFT_CENTER, msg, ui_font(11.5), muted());
+        }
+    }
+}
+
+/// Small grey section header, as in a macOS source list.
+fn section(ui: &mut Ui, label: &str) {
+    ui.add_space(10.0);
+    ui.label(RichText::new(label).font(ui_font(11.0)).color(muted()));
+    ui.add_space(2.0);
+}
+
+/// A full-width clickable sidebar row with hover wash; the caller paints its content.
+fn row_frame(ui: &mut Ui, selected: bool) -> egui::Response {
+    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click());
+    widgets::hover_wash(ui, r, &resp, selected);
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    resp
+}
+
+fn nav_row(ui: &mut Ui, icon: Icon, label: &str, trailing: Option<&str>, selected: bool) -> egui::Response {
+    let resp = row_frame(ui, selected);
+    let r = resp.rect;
+    let p = ui.painter();
+    let ic = if selected { theme::accent() } else { theme::text().gamma_multiply(0.8) };
+    widgets::draw_icon(p, Rect::from_center_size(pos2(r.left() + 14.0, r.center().y), vec2(16.0, 16.0)), icon, ic);
+    p.text(pos2(r.left() + 30.0, r.center().y), Align2::LEFT_CENTER, label, ui_font(13.0), text());
+    if let Some(t) = trailing {
+        let badge = t.chars().all(|c| c.is_ascii_digit());
+        if badge {
+            let g = p.layout_no_wrap(t.to_string(), ui_font(10.5), Color32::WHITE);
+            let pill = Rect::from_min_size(
+                pos2(r.right() - 10.0 - g.size().x - 10.0, r.center().y - 8.0),
+                vec2(g.size().x + 10.0, 16.0),
+            );
+            p.rect_filled(pill, 8.0, theme::down());
+            p.galley(pos2(pill.left() + 5.0, r.center().y - g.size().y / 2.0), g, Color32::WHITE);
+        } else {
+            p.text(pos2(r.right() - 8.0, r.center().y), Align2::RIGHT_CENTER, t, mono(10.5), muted());
+        }
+    }
+    resp
+}

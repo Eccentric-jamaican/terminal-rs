@@ -112,11 +112,12 @@ pub struct PaneOutput {
     pub vol_max: f64,
 }
 
-fn transform(v: &Viewport, height_px: f64, scale: &PriceScale) -> PaneTransform {
+/// GPU transform for a pane laid out in points; the shader works in physical pixels.
+fn transform(v: &Viewport, height_pt: f64, scale: &PriceScale, ppp: f32) -> PaneTransform {
     let (y_lo, y_hi) = scale.bounds_t();
     PaneTransform {
-        width_px: v.width_px as f32,
-        height_px: height_px as f32,
+        width_px: v.width_px as f32 * ppp,
+        height_px: height_pt as f32 * ppp,
         left: v.left(),
         visible_bars: v.visible_bars(),
         y_lo,
@@ -171,7 +172,7 @@ pub fn price_pane(p: &PricePane<'_>) -> PaneOutput {
         }
         s
     });
-    let t = transform(v, p.height_px, &scale);
+    let t = transform(v, p.height_px, &scale, p.style.pixels_per_point);
     let mut style = p.style;
     style.ohlc_bars = p.chart_type == ChartType::Bars;
     style.vol_max = vol_max as f32;
@@ -284,7 +285,7 @@ pub fn sub_pane(
     } else {
         PriceScale::padded(l, h, 0.1, false, height_px)
     };
-    let t = transform(v, height_px, &scale);
+    let t = transform(v, height_px, &scale, style.pixels_per_point);
     let cmds = overlay_cmds(overlays, v, &t, &style);
     PaneOutput { cmds, scale, level: 0, vol_max: 0.0 }
 }
@@ -329,6 +330,35 @@ mod tests {
         let other = line_ref(&[1.0, f64::NAN, 4.0, 5.0]);
         assert_eq!(rebase_factor(&base, &other, 0, 4), 5.0);
         assert_eq!(rebase_factor(&base, &other, 3, 4), 6.0);
+    }
+
+    #[test]
+    fn retina_scales_pane_and_strokes() {
+        let s = SeriesGpu::build(&sample::generate("X", Timeframe::D1, 500, 1_790_000_000));
+        let v = Viewport::fit_last(500, 100, 400.0);
+        let pane = |ppp: f32| {
+            price_pane(&PricePane {
+                series: &s,
+                chart_type: ChartType::Candles,
+                show_volume: false,
+                overlays: &[],
+                viewport: &v,
+                height_px: 300.0,
+                log: false,
+                manual_scale: None,
+                style: Style { pixels_per_point: ppp, ..Style::default() },
+            })
+        };
+        let (one, two) = (pane(1.0), pane(2.0));
+        let u = |o: &PaneOutput| match &o.cmds[0] {
+            DrawCmd::Candles { uniforms, .. } => *uniforms,
+            _ => unreachable!(),
+        };
+        assert_eq!(u(&two).rect[0], 2.0 * u(&one).rect[0]);
+        assert_eq!(u(&two).rect[1], 600.0);
+        assert_eq!(u(&two).params[1], 2.0 * u(&one).params[1]);
+        // Price mapping (points) is unchanged.
+        assert_eq!(one.scale, two.scale);
     }
 
     #[test]

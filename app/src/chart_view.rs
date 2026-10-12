@@ -3,7 +3,10 @@
 
 use std::sync::Arc;
 
-use egui::{Align2, Color32, CursorIcon, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
+use egui::{
+    Align2, Color32, CornerRadius, CursorIcon, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, UiBuilder, pos2,
+    vec2,
+};
 use tr_chart::drawings::{self, Anchor, Drawing, Shape, Tool};
 use tr_chart::gpu::{ChartCallback, Frame, LineKind, LineRef, Style};
 use tr_chart::scale;
@@ -13,13 +16,15 @@ use tr_congress::{Trade, TxType};
 use tr_core::{AssetClass, Bar, Security, Timeframe};
 
 use crate::command::{IndicatorSpec, Range};
-use crate::theme::{self, AMBER, AMBER_DIM, MUTED, TEXT, mono};
+use crate::congress_view::Action;
+use crate::theme::{self, amber, amber_dim, mono, muted, text, ui_font};
+use crate::widgets;
 use crate::worker::{BuiltIndicator, PaneId, Request, Worker, initial_limit};
 
 const AXIS_W: f32 = 66.0;
 const TIME_H: f32 = 16.0;
-const HEADER_H: f32 = 18.0;
-const RANGE_H: f32 = 16.0;
+const HEADER_H: f32 = 32.0;
+const RANGE_H: f32 = 20.0;
 const DEFAULT_VISIBLE: usize = 160;
 
 #[derive(Default)]
@@ -62,6 +67,8 @@ pub struct ChartState {
     sec: Security,
     last_live: Option<std::time::Instant>,
     last_indicator_req: Option<std::time::Instant>,
+    /// App-level actions requested from this chart (context menu), drained by the app.
+    pub actions: Vec<Action>,
 }
 
 impl ChartState {
@@ -101,6 +108,7 @@ impl ChartState {
             sec: tr_data::security(symbol),
             last_live: None,
             last_indicator_req: None,
+            actions: Vec::new(),
         }
     }
 
@@ -256,6 +264,7 @@ impl ChartState {
                 bars: self.bars.clone(),
                 tf: self.tf,
                 specs: self.indicators.clone(),
+                palette: theme::palette(),
             });
         }
     }
@@ -389,75 +398,58 @@ impl ChartState {
     /// Draw the pane into `rect`. Returns true if the pane was clicked (focus request).
     pub fn show(&mut self, ui: &mut Ui, rect: Rect, focused: bool, w: &Worker) -> bool {
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, theme::BG);
+        let r = theme::CARD_RADIUS.saturating_sub(1);
+        painter.rect_filled(rect, r, theme::card());
         let mut clicked = false;
 
-        // Header: security + interval + type; clickable interval/type selectors.
+        // Header: ticker, yellow key and name, then segmented interval and type controls.
         let header = Rect::from_min_size(rect.min, vec2(rect.width(), HEADER_H));
-        painter.rect_filled(header, 0.0, theme::HEADER);
-        let mut x = header.left() + 6.0;
-        let title = self.symbol.clone();
-        let g = painter.layout_no_wrap(title, mono(12.5), AMBER);
-        painter.galley(pos2(x, header.center().y - g.size().y / 2.0), g.clone(), AMBER);
-        x += g.size().x + 12.0;
-        for tf in Timeframe::ALL {
-            let label = tf.label();
-            let r =
-                Rect::from_min_size(pos2(x, header.top() + 1.0), vec2(label.len() as f32 * 7.6 + 6.0, HEADER_H - 2.0));
-            if r.right() > header.right() - 120.0 {
-                break;
-            }
-            let resp = ui.interact(r, ui.id().with((self.id, "tf", label)), Sense::click());
-            let active = tf == self.tf;
-            if active {
-                painter.rect_filled(r, 0.0, Color32::from_rgb(70, 50, 0));
-            }
-            let col = if active {
-                AMBER
-            } else if resp.hovered() {
-                TEXT
-            } else {
-                MUTED
-            };
-            painter.text(r.center(), Align2::CENTER_CENTER, label, mono(11.5), col);
-            if resp.clicked() {
-                self.set_timeframe(tf, w);
-                clicked = true;
-            }
-            x = r.right() + 2.0;
+        painter.rect_filled(header, CornerRadius { nw: r, ne: r, sw: 0, se: 0 }, theme::header());
+        painter.hline(header.x_range(), header.bottom(), Stroke::new(1.0, theme::border()));
+        let mut hui = ui.new_child(
+            UiBuilder::new()
+                .max_rect(header.shrink2(vec2(10.0, 0.0)))
+                .layout(egui::Layout::left_to_right(egui::Align::Center))
+                .id_salt((self.id, "header")),
+        );
+        hui.spacing_mut().item_spacing.x = 8.0;
+        hui.label(RichText::new(&self.sec.ticker).font(mono(13.0)).color(amber()));
+        hui.label(RichText::new(self.sec.class.yellow_key().label()).font(ui_font(12.0)).color(muted()));
+        if let Some(name) = self.sec.name().filter(|_| header.width() > 760.0) {
+            hui.label(RichText::new(name).font(ui_font(12.0)).color(muted()));
         }
-        x += 8.0;
-        for ct in ChartType::ALL {
-            let label = ct.label();
-            let r =
-                Rect::from_min_size(pos2(x, header.top() + 1.0), vec2(label.len() as f32 * 7.2 + 6.0, HEADER_H - 2.0));
-            if r.right() > header.right() - 64.0 {
-                break;
-            }
-            let resp = ui.interact(r, ui.id().with((self.id, "ct", label)), Sense::click());
-            let col = if ct == self.chart_type {
-                AMBER
-            } else if resp.hovered() {
-                TEXT
-            } else {
-                MUTED
-            };
-            painter.text(r.center(), Align2::CENTER_CENTER, label, mono(11.0), col);
-            if resp.clicked() {
-                self.chart_type = ct;
-                clicked = true;
-            }
-            x = r.right() + 2.0;
+        hui.add_space(4.0);
+        let tf_labels: Vec<&str> = Timeframe::ALL.iter().map(|t| t.label()).collect();
+        let selected_tf = Timeframe::ALL.iter().position(|t| *t == self.tf);
+        if hui.available_width() > 300.0
+            && let Some(i) = widgets::segmented(&mut hui, (self.id, "tf"), &tf_labels, selected_tf, 22.0)
+        {
+            self.set_timeframe(Timeframe::ALL[i], w);
+            clicked = true;
         }
-
+        let ct_labels: Vec<&str> = ChartType::ALL.iter().map(|c| c.label()).collect();
+        let selected_ct = ChartType::ALL.iter().position(|c| *c == self.chart_type);
+        if hui.available_width() > 260.0
+            && let Some(i) = widgets::segmented(&mut hui, (self.id, "ct"), &ct_labels, selected_ct, 22.0)
+        {
+            self.chart_type = ChartType::ALL[i];
+            clicked = true;
+        }
         if self.last_live.is_some_and(|t| t.elapsed().as_secs() < 5) {
-            painter.text(
-                pos2(header.right() - 8.0, header.center().y),
-                Align2::RIGHT_CENTER,
-                "● LIVE",
-                mono(11.0),
-                theme::UP,
+            let pulse = 0.6 + 0.4 * ((ui.input(|i| i.time) * 3.0).sin() as f32).abs();
+            painter.circle_filled(
+                pos2(header.right() - 52.0, header.center().y),
+                3.5,
+                theme::up().gamma_multiply(pulse),
             );
+            painter.text(
+                pos2(header.right() - 12.0, header.center().y),
+                Align2::RIGHT_CENTER,
+                "LIVE",
+                ui_font(11.0),
+                theme::up(),
+            );
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
         }
 
         // Bottom quick-range row.
@@ -471,7 +463,7 @@ impl ChartState {
                 Align2::CENTER_CENTER,
                 r.label(),
                 mono(11.0),
-                if resp.hovered() { AMBER } else { MUTED },
+                if resp.hovered() { amber() } else { muted() },
             );
             if resp.clicked() {
                 self.set_range(r, w);
@@ -495,7 +487,7 @@ impl ChartState {
             Align2::RIGHT_CENTER,
             status,
             mono(10.5),
-            MUTED,
+            muted(),
         );
 
         let body = Rect::from_min_max(pos2(rect.left(), header.bottom()), pos2(rect.right(), range_row.top()));
@@ -506,7 +498,7 @@ impl ChartState {
 
         let Some(gpu) = self.gpu.clone() else {
             let msg = self.error.clone().unwrap_or_else(|| format!("Loading {} {}…", self.symbol, self.tf));
-            painter.text(plot_all.center(), Align2::CENTER_CENTER, msg, mono(13.0), AMBER_DIM);
+            painter.text(plot_all.center(), Align2::CENTER_CENTER, msg, mono(13.0), amber_dim());
             return clicked;
         };
 
@@ -534,6 +526,9 @@ impl ChartState {
             clicked = true;
         }
         let hover = plot_resp.hover_pos().filter(|p| plot_all.contains(*p));
+        if self.draw.tool.is_none() {
+            plot_resp.context_menu(|ui| self.context_menu(ui, w));
+        }
 
         if plot_resp.hovered() || axis_resp.hovered() || time_resp.hovered() {
             let (scroll, zoom_delta) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta()));
@@ -599,15 +594,16 @@ impl ChartState {
             self.compare_scale = scale;
             overlays.push(Overlay {
                 line: c.clone(),
-                color: theme::rgba(theme::SERIES[5]),
+                color: theme::rgba(theme::series(5)),
                 kind: LineKind::Line,
                 scale,
             });
         }
         let style = Style {
-            up: theme::rgba(theme::UP),
-            down: theme::rgba(theme::DOWN),
-            color: theme::rgba(AMBER),
+            up: theme::rgba(theme::up()),
+            down: theme::rgba(theme::down()),
+            color: theme::rgba(amber()),
+            pixels_per_point: ui.ctx().pixels_per_point(),
             ..Style::default()
         };
         let out = scene::price_pane(&PricePane {
@@ -644,7 +640,7 @@ impl ChartState {
         let dec = scale::decimals_for(step).max(self.sec.decimals(scale.hi).min(3));
         for t in &ticks {
             let y = price_rect.top() + scale.y_of(*t) as f32;
-            price_painter.hline(price_rect.x_range(), y, Stroke::new(1.0, theme::GRID));
+            price_painter.hline(price_rect.x_range(), y, Stroke::new(1.0, theme::grid()));
         }
         let frame_no = ui.ctx().cumulative_frame_nr();
         let frame = Frame { pane: self.id * 8, frame_no, cmds: out.cmds };
@@ -662,7 +658,7 @@ impl ChartState {
             s.thickness_px = 1.3;
             let so = scene::sub_pane(&ovs, &v, r.height() as f64, fixed, s);
             let p = ui.painter_at(r);
-            p.hline(r.x_range(), r.top(), Stroke::new(1.0, theme::BORDER));
+            p.hline(r.x_range(), r.top(), Stroke::new(1.0, theme::border()));
             if matches!(b.spec, IndicatorSpec::Rsi(_)) {
                 for lvl in [30.0, 70.0] {
                     p.hline(
@@ -679,7 +675,7 @@ impl ChartState {
 
         // ---- axes ----
         let axis_painter = ui.painter_at(Rect::from_min_max(pos2(plot_all.right(), body.top()), body.max));
-        axis_painter.vline(plot_all.right(), body.y_range(), Stroke::new(1.0, theme::BORDER));
+        axis_painter.vline(plot_all.right(), body.y_range(), Stroke::new(1.0, theme::border()));
         let positive_prices = self.bars.last().is_some_and(|b| b.low > 0.0);
         for t in &ticks {
             let y = price_rect.top() + scale.y_of(*t) as f32;
@@ -693,13 +689,13 @@ impl ChartState {
                     Align2::LEFT_CENTER,
                     scale::format_price(*t, dec),
                     mono(11.0),
-                    MUTED,
+                    muted(),
                 );
             }
         }
         for (r, bi, s) in &sub_rects {
             let label = self.built[*bi].spec.label();
-            ui.painter_at(*r).text(r.left_top() + vec2(6.0, 3.0), Align2::LEFT_TOP, label, mono(10.5), MUTED);
+            ui.painter_at(*r).text(r.left_top() + vec2(6.0, 3.0), Align2::LEFT_TOP, label, mono(10.5), muted());
             for t in scale::price_ticks(s.lo, s.hi, 3) {
                 let y = r.top() + s.y_of(t) as f32;
                 if y > r.top() + 8.0 && y < r.bottom() - 4.0 {
@@ -708,7 +704,7 @@ impl ChartState {
                         Align2::LEFT_CENTER,
                         format!("{t:.1}"),
                         mono(10.5),
-                        MUTED,
+                        muted(),
                     );
                 }
             }
@@ -716,7 +712,7 @@ impl ChartState {
         // Time axis labels (sampled so 1M visible bars stays cheap).
         let (lo, hi) = v.visible_range(len);
         let time_painter = ui.painter_at(time_rect);
-        time_painter.hline(time_rect.x_range(), time_rect.top(), Stroke::new(1.0, theme::BORDER));
+        time_painter.hline(time_rect.x_range(), time_rect.top(), Stroke::new(1.0, theme::border()));
         if hi > lo {
             let stride = ((hi - lo) / 600).max(1);
             let idxs: Vec<usize> = (lo..hi).step_by(stride).collect();
@@ -724,8 +720,8 @@ impl ChartState {
             let gap = 90.0 / (v.bar_px * stride as f64);
             for (j, label) in scale::time_ticks(&times, 0, times.len(), gap, self.tf) {
                 let x = price_rect.left() + v.x_center(idxs[j]) as f32;
-                ui.painter_at(plot_all).vline(x, plot_all.y_range(), Stroke::new(1.0, theme::GRID));
-                time_painter.text(pos2(x, time_rect.center().y), Align2::CENTER_CENTER, label, mono(10.5), MUTED);
+                ui.painter_at(plot_all).vline(x, plot_all.y_range(), Stroke::new(1.0, theme::grid()));
+                time_painter.text(pos2(x, time_rect.center().y), Align2::CENTER_CENTER, label, mono(10.5), muted());
             }
         }
 
@@ -733,7 +729,7 @@ impl ChartState {
         if let Some(last) = self.bars.last() {
             let y = price_rect.top() + scale.y_of(last.close) as f32;
             if price_rect.y_range().contains(y) {
-                let col = if last.is_up() { theme::UP } else { theme::DOWN };
+                let col = if last.is_up() { theme::up() } else { theme::down() };
                 let mut xx = price_rect.left();
                 while xx < price_rect.right() {
                     price_painter.hline(
@@ -781,7 +777,7 @@ impl ChartState {
                     Align2::LEFT_CENTER,
                     scale::format_price(price, self.sec.decimals(price)),
                     mono(11.0),
-                    TEXT,
+                    text(),
                 );
             }
             if let Some(i) = hovered_bar {
@@ -789,7 +785,7 @@ impl ChartState {
                 let gw = label.len() as f32 * 7.0 + 10.0;
                 let tag = Rect::from_center_size(pos2(xi, time_rect.center().y), vec2(gw, TIME_H));
                 time_painter.rect_filled(tag, 0.0, Color32::from_gray(70));
-                time_painter.text(tag.center(), Align2::CENTER_CENTER, label, mono(10.5), TEXT);
+                time_painter.text(tag.center(), Align2::CENTER_CENTER, label, mono(10.5), text());
             }
             if self.draw.tool.is_some() {
                 ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
@@ -797,10 +793,75 @@ impl ChartState {
         }
         self.paint_legend(ui, price_rect, hovered_bar.unwrap_or(len.saturating_sub(1)), &sub_rects);
 
-        if focused {
-            ui.painter().rect_stroke(rect, 0.0, Stroke::new(1.0, theme::FOCUS), StrokeKind::Inside);
-        }
+        let _ = focused; // the surrounding card shows focus
         clicked
+    }
+
+    fn context_menu(&mut self, ui: &mut Ui, w: &Worker) {
+        ui.set_min_width(190.0);
+        if ui.button("Reset View").clicked() {
+            self.reset_view();
+            ui.close();
+        }
+        ui.menu_button("Chart Type", |ui| {
+            for ct in ChartType::ALL {
+                if ui.radio(self.chart_type == ct, ct.label()).clicked() {
+                    self.chart_type = ct;
+                    ui.close();
+                }
+            }
+        });
+        ui.menu_button("Indicators", |ui| {
+            for spec in [
+                IndicatorSpec::Sma(20),
+                IndicatorSpec::Sma(50),
+                IndicatorSpec::Ema(20),
+                IndicatorSpec::Vwap,
+                IndicatorSpec::Bollinger(20, 2.0),
+                IndicatorSpec::Rsi(14),
+                IndicatorSpec::Macd(12, 26, 9),
+            ] {
+                let on = self.indicators.contains(&spec);
+                if ui.checkbox(&mut on.clone(), spec.label()).clicked() {
+                    self.toggle_indicator(spec, w);
+                }
+            }
+            ui.separator();
+            if ui.button("Remove All").clicked() {
+                self.clear_indicators();
+                ui.close();
+            }
+        });
+        ui.menu_button("Draw", |ui| {
+            let alt = if cfg!(target_os = "macos") { "⌥" } else { "Alt+" };
+            for (tool, key) in
+                [(Tool::Trendline, "T"), (Tool::Horizontal, "H"), (Tool::Vertical, "V"), (Tool::Fib, "F")]
+            {
+                if ui.add(egui::Button::new(tool.label()).shortcut_text(format!("{alt}{key}"))).clicked() {
+                    self.start_tool(tool);
+                    ui.close();
+                }
+            }
+            if ui.button("Remove All Drawings").clicked() {
+                self.drawings.clear();
+                ui.close();
+            }
+        });
+        ui.checkbox(&mut self.log, "Log Scale");
+        ui.checkbox(&mut self.magnet, "Magnet");
+        ui.checkbox(&mut self.show_volume, "Volume");
+        ui.separator();
+        if ui.button("Add to Watchlist").clicked() {
+            self.actions.push(Action::AddToWatchlist(self.symbol.clone()));
+            ui.close();
+        }
+        if self.sec.has_congress_trades() {
+            ui.checkbox(&mut self.show_congress, "Congress Trade Markers");
+            if ui.button("Who in Congress Traded This…").clicked() {
+                self.actions.push(Action::OpenTicker(self.symbol.clone()));
+                ui.close();
+            }
+        }
     }
 
     fn paint_legend(&self, ui: &Ui, price_rect: Rect, i: usize, sub_rects: &[(Rect, usize, PriceScale)]) {
@@ -808,7 +869,7 @@ impl ChartState {
         let p = ui.painter_at(price_rect);
         let prev = if i > 0 { self.bars[i - 1].close } else { b.open };
         let chg = b.close - prev;
-        let col = if chg >= 0.0 { theme::UP } else { theme::DOWN };
+        let col = if chg >= 0.0 { theme::up() } else { theme::down() };
         let dec = self.sec.decimals(b.close);
         let mut x = price_rect.left() + 6.0;
         let y = price_rect.top() + 4.0;
@@ -817,12 +878,12 @@ impl ChartState {
             p.galley(pos2(*x, y), g.clone(), color);
             *x += g.size().x + 8.0;
         };
-        put(format!("{} · {}", self.sec.ticker, self.tf), AMBER, &mut x);
+        put(format!("{} · {}", self.sec.ticker, self.tf), amber(), &mut x);
         for (k, val) in [("O", b.open), ("H", b.high), ("L", b.low), ("C", b.close)] {
             put(format!("{k}{val:.dec$}"), col, &mut x);
         }
         put(format!("{:+.dec$} ({:+.2}%)", chg, if prev != 0.0 { chg / prev * 100.0 } else { 0.0 }), col, &mut x);
-        put(format!("Vol {}", scale::format_volume(b.volume)), MUTED, &mut x);
+        put(format!("Vol {}", scale::format_volume(b.volume)), muted(), &mut x);
 
         // Overlay indicator values, one per line.
         let mut ly = y + 16.0;
@@ -841,7 +902,7 @@ impl ChartState {
                         255,
                     )
                 })
-                .unwrap_or(TEXT);
+                .unwrap_or(text());
             p.text(
                 pos2(price_rect.left() + 6.0, ly),
                 Align2::LEFT_TOP,
@@ -859,7 +920,7 @@ impl ChartState {
                 (Some(r), Some(rel)) => format!("CMP {sym}  {r:.2}  ({rel:+.2}% vs {})", self.symbol),
                 _ => format!("CMP {sym}"),
             };
-            p.text(pos2(price_rect.left() + 6.0, ly), Align2::LEFT_TOP, text, mono(11.0), theme::SERIES[5]);
+            p.text(pos2(price_rect.left() + 6.0, ly), Align2::LEFT_TOP, text, mono(11.0), theme::series(5));
             ly += 14.0;
         }
         if let Some(tool) = self.draw.tool {
@@ -873,14 +934,20 @@ impl ChartState {
                 Align2::LEFT_TOP,
                 format!("{}: {msg}", tool.label()),
                 mono(11.0),
-                AMBER,
+                amber(),
             );
         }
         for (r, bi, _) in sub_rects {
             let b = &self.built[*bi];
             let vals: Vec<String> =
                 b.overlays.iter().filter_map(|(n, o)| value_at(&o.line).map(|v| format!("{n} {v:.2}"))).collect();
-            ui.painter_at(*r).text(r.left_top() + vec2(90.0, 3.0), Align2::LEFT_TOP, vals.join("  "), mono(10.5), TEXT);
+            ui.painter_at(*r).text(
+                r.left_top() + vec2(90.0, 3.0),
+                Align2::LEFT_TOP,
+                vals.join("  "),
+                mono(10.5),
+                text(),
+            );
         }
     }
 
@@ -957,7 +1024,7 @@ impl ChartState {
             all.push((Drawing::new(tool, first, pointer_anchor(self, h)), true));
         }
         for (d, selected) in all {
-            let color = if selected { AMBER } else { theme::CYAN };
+            let color = if selected { amber() } else { theme::cyan() };
             let stroke = Stroke::new(if selected { 2.0 } else { 1.3 }, color);
             for (shape, label) in self.drawing_shapes(&d, rect, v, s) {
                 match shape {
@@ -974,7 +1041,7 @@ impl ChartState {
                         }
                         if selected && d.tool == Tool::Trendline {
                             for q in [a, b] {
-                                p.circle_filled(pos2(q[0] as f32, q[1] as f32), 3.5, AMBER);
+                                p.circle_filled(pos2(q[0] as f32, q[1] as f32), 3.5, amber());
                             }
                         }
                     }
@@ -1078,7 +1145,7 @@ fn hover_card(ui: &Ui, at: Pos2, t: &Trade) {
             format!("{} ({}-{})", t.politician, t.party.code(), t.state.as_deref().unwrap_or("??")),
             theme::party_color(t.party),
         ),
-        (format!("{} · {}", t.chamber.as_str(), t.owner.as_deref().unwrap_or("Self")), MUTED),
+        (format!("{} · {}", t.chamber.as_str(), t.owner.as_deref().unwrap_or("Self")), muted()),
         (
             format!(
                 "{} {}  {}",
@@ -1092,13 +1159,13 @@ fn hover_card(ui: &Ui, at: Pos2, t: &Trade) {
                 t.ticker.as_deref().unwrap_or("-"),
                 t.amount.map(|a| a.to_string()).unwrap_or_else(|| "amount n/a".into())
             ),
-            if t.tx_type.is_buy() { theme::UP } else { theme::DOWN },
+            if t.tx_type.is_buy() { theme::up() } else { theme::down() },
         ),
-        (format!("Traded  {}", t.tx_date), TEXT),
-        (format!("Filed   {}", t.filed_date), TEXT),
+        (format!("Traded  {}", t.tx_date), text()),
+        (format!("Filed   {}", t.filed_date), text()),
         (
             format!("Disclosure lag {} days", t.disclosure_lag_days()),
-            if t.disclosure_lag_days() > 45 { theme::DOWN } else { AMBER },
+            if t.disclosure_lag_days() > 45 { theme::down() } else { amber() },
         ),
     ];
     let w = lines.iter().map(|(l, _)| l.len()).max().unwrap_or(10) as f32 * 7.2 + 14.0;
@@ -1115,7 +1182,7 @@ fn hover_card(ui: &Ui, at: Pos2, t: &Trade) {
     let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("congress-card"));
     let p = ui.ctx().layer_painter(layer);
     p.rect_filled(card, 0.0, Color32::from_rgb(16, 16, 16));
-    p.rect_stroke(card, 0.0, Stroke::new(1.0, AMBER_DIM), StrokeKind::Inside);
+    p.rect_stroke(card, 0.0, Stroke::new(1.0, amber_dim()), StrokeKind::Inside);
     for (k, (l, c)) in lines.iter().enumerate() {
         p.text(card.left_top() + vec2(7.0, 4.0 + k as f32 * 14.0), Align2::LEFT_TOP, l, mono(11.5), *c);
     }

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use egui::{Align2, Color32, Event, Key, Modifiers, Rect, RichText, Stroke, StrokeKind, Ui, UiBuilder, pos2, vec2};
+use egui::{Color32, Event, Key, Modifiers, Rect, RichText, Ui, UiBuilder, pos2, vec2};
 use serde::{Deserialize, Serialize};
 use tr_chart::drawings::{Drawing, Tool};
 use tr_chart::scene::ChartType;
@@ -12,17 +12,18 @@ use tr_congress::db::{Alert, PoliticianSummary};
 use tr_core::Timeframe;
 use tr_data::{Quote, SearchHit, YieldCurves};
 
+use crate::anim;
 use crate::chart_view::ChartState;
 use crate::command::{self, Command, Function, IndicatorSpec};
 use crate::congress_view::{self, Action, FeedFilter};
 use crate::layout::Layout;
 use crate::markets_view;
-use crate::theme::{self, AMBER, AMBER_DIM, MUTED, TEXT, mono};
+use crate::theme::{self, amber, mono, muted, text};
 use crate::worker::{PaneId, Profile, Request, Response, Worker, data_dir};
 
-const TOP_H: f32 = 40.0;
-const BOTTOM_H: f32 = 20.0;
-const PANE_TITLE_H: f32 = 18.0;
+mod chrome;
+
+use chrome::{GAP, SIDEBAR_W, STATUS_H, SidebarCmd, TOOLBAR_H, TRAFFIC_INSET};
 
 pub enum PaneKind {
     Chart(Box<ChartState>),
@@ -70,6 +71,12 @@ struct Settings {
     layout: Layout,
     watchlist: Vec<String>,
     panes: Vec<PaneSettings>,
+    #[serde(default = "default_true")]
+    sidebar: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize)]
@@ -140,6 +147,14 @@ pub struct TerminalApp {
     perf_cpu_ms: f64,
     perf_dt_ms: f64,
     last_frame: Option<Instant>,
+
+    sidebar_open: bool,
+    /// System accent colour (macOS) or the default blue.
+    accent: Color32,
+    last_accent_poll: Option<Instant>,
+    window_styled: bool,
+    /// The window is see-through behind the sidebar (macOS vibrancy).
+    vibrancy: bool,
 }
 
 /// Resolve a run of words (`BTCUSD CRNCY AAPL US EQUITY MSFT`) into market keys.
@@ -165,7 +180,13 @@ fn settings_path() -> std::path::PathBuf {
 
 impl TerminalApp {
     pub fn new(ctx: &egui::Context, worker: Worker, provider: String) -> Self {
-        theme::apply(ctx);
+        let accent = tr_macos::accent_color().map_or(theme::DEFAULT_ACCENT, |[r, g, b]| Color32::from_rgb(r, g, b));
+        theme::apply(ctx, accent);
+        match std::env::var("TR_THEME").map(|v| v.to_ascii_lowercase()).as_deref() {
+            Ok("light") => ctx.set_theme(egui::ThemePreference::Light),
+            Ok("dark") => ctx.set_theme(egui::ThemePreference::Dark),
+            _ => ctx.set_theme(egui::ThemePreference::System),
+        }
         let settings: Option<Settings> =
             std::fs::read(settings_path()).ok().and_then(|b| serde_json::from_slice(&b).ok());
         let mut app = Self {
@@ -220,6 +241,11 @@ impl TerminalApp {
             perf_cpu_ms: 0.0,
             perf_dt_ms: 0.0,
             last_frame: None,
+            sidebar_open: true,
+            accent,
+            last_accent_poll: None,
+            window_styled: false,
+            vibrancy: false,
         };
         match settings {
             Some(s) => {
@@ -227,6 +253,7 @@ impl TerminalApp {
                 // Older settings stored bare tickers; normalise to market keys.
                 app.watchlist = s.watchlist.iter().map(|w| tr_data::security(w).key()).collect();
                 app.watchlist.dedup();
+                app.sidebar_open = s.sidebar;
                 for p in s.panes {
                     let kind = app.kind_from_settings(p);
                     app.push_pane(kind);
@@ -300,7 +327,7 @@ impl TerminalApp {
                 PaneKind::Search { query } => PaneSettings::Search(query.clone()),
             })
             .collect();
-        let s = Settings { layout: self.layout, watchlist: self.watchlist.clone(), panes };
+        let s = Settings { layout: self.layout, watchlist: self.watchlist.clone(), panes, sidebar: self.sidebar_open };
         if let Ok(json) = serde_json::to_vec_pretty(&s) {
             let path = settings_path();
             let tmp = path.with_extension("json.tmp");
@@ -440,6 +467,14 @@ impl TerminalApp {
                     self.open_panel(PaneKind::Ticker { symbol: s, trades: Vec::new(), loading: true })
                 }
                 Action::OpenProfile(q) => self.open_panel(PaneKind::Profile { query: q, data: None, loading: true }),
+                Action::AddToWatchlist(s) => {
+                    let key = tr_data::security(&s).key();
+                    if !self.watchlist.contains(&key) {
+                        self.status = format!("Added {key} to the watchlist");
+                        self.watchlist.push(key);
+                        self.last_quotes = None;
+                    }
+                }
                 Action::Track(q, on) => {
                     self.worker.send(Request::Track { query: q.clone(), on });
                     // Refresh any open profile so the star updates.
@@ -676,6 +711,10 @@ impl TerminalApp {
     /// Global and chart hotkeys. Runs before the command line so it can claim keys; when
     /// the command line holds text, keys belong to it.
     fn hotkeys(&mut self, ctx: &egui::Context) {
+        // ⌃⌘S on macOS (Ctrl+S elsewhere) toggles the sidebar, as in native apps.
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::COMMAND, Key::S)) {
+            self.sidebar_open = !self.sidebar_open;
+        }
         let cmd_id = egui::Id::new("command-line");
         let focused = ctx.memory(|m| m.focused());
         let cmd_focused = focused == Some(cmd_id);
@@ -784,259 +823,14 @@ impl TerminalApp {
 
     // ---- drawing -------------------------------------------------------------------------
 
-    fn top_bar(&mut self, ui: &mut Ui, rect: Rect) -> bool {
-        let p = ui.painter_at(rect);
-        p.rect_filled(rect, 0.0, theme::PANEL);
-        let logo = Rect::from_min_size(rect.min + vec2(4.0, 4.0), vec2(118.0, 20.0));
-        p.rect_filled(logo, 0.0, AMBER);
-        p.text(logo.center(), Align2::CENTER_CENTER, "TERMINAL-RS", mono(13.0), Color32::BLACK);
-        let now = chrono::Local::now();
-        let clock = format!("{}  {} UTC", now.format("%a %d %b %H:%M:%S"), chrono::Utc::now().format("%H:%M"));
-        p.text(pos2(rect.right() - 8.0, rect.top() + 14.0), Align2::RIGHT_CENTER, clock, mono(12.0), AMBER);
-        let unread = self.alerts.iter().filter(|a| !a.seen).count();
-        let right_info = format!(
-            "LAYOUT {}  DATA {}{}",
-            self.layout.label(),
-            self.provider.to_uppercase(),
-            if unread > 0 { format!("   ALERTS {unread}") } else { String::new() }
-        );
-        p.text(
-            pos2(rect.right() - 8.0, rect.top() + 31.0),
-            Align2::RIGHT_CENTER,
-            right_info,
-            mono(11.0),
-            if unread > 0 { AMBER } else { MUTED },
-        );
-
-        let cmd_rect = Rect::from_min_max(
-            pos2(logo.right() + 8.0, rect.top() + 4.0),
-            pos2(rect.right() - 300.0, rect.top() + 24.0),
-        );
-        let suggestions = self.suggestions();
-        // Claim navigation keys for the dropdown before the text field sees them.
-        let (sel_down, sel_up, complete) = if suggestions.is_empty() {
-            (false, false, false)
-        } else {
-            ui.input_mut(|i| {
-                (
-                    i.consume_key(Modifiers::NONE, Key::ArrowDown),
-                    i.consume_key(Modifiers::NONE, Key::ArrowUp),
-                    i.consume_key(Modifiers::NONE, Key::Tab),
-                )
-            })
-        };
-        if sel_down {
-            self.suggestion = Some(self.suggestion.map_or(0, |i| (i + 1).min(suggestions.len() - 1)));
-        }
-        if sel_up {
-            self.suggestion = self.suggestion.and_then(|i| i.checked_sub(1));
-        }
-        if complete {
-            let pick = &suggestions[self.suggestion.unwrap_or(0)];
-            self.cmd = format!("{} ", pick.key);
-            self.suggestion = None;
-            self.focus_cmd = true;
-        }
-        let mut child = ui.new_child(UiBuilder::new().max_rect(cmd_rect));
-        let id = egui::Id::new("command-line");
-        let te = egui::TextEdit::singleline(&mut self.cmd)
-            .id(id)
-            .font(mono(14.0))
-            .text_color(AMBER)
-            .hint_text(
-                RichText::new(
-                    "<KEY> <GO>   e.g. BTCUSD <CRNCY> · US10Y GOVT · CL1 CMDTY · SPX INDEX · AAPL · WEI · GC",
-                )
-                .color(AMBER_DIM),
-            )
-            .desired_width(cmd_rect.width())
-            .frame(
-                egui::Frame::new()
-                    .fill(Color32::from_rgb(20, 16, 0))
-                    .stroke(Stroke::new(1.0, AMBER_DIM))
-                    .inner_margin(vec2(6.0, 2.0)),
-            );
-        let resp = child.add(te.lock_focus(true));
-        if resp.changed() {
-            self.suggestion = None;
-            let q = self.cmd.trim().to_string();
-            if q.len() >= 2 && !self.suggestions().is_empty() {
-                self.search_pending = Some((q, Instant::now()));
-            }
-        }
-        if self.focus_cmd {
-            resp.request_focus();
-            // Place the cursor at the end after type-to-command.
-            if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), id) {
-                let ccursor = egui::text::CCursor::new(self.cmd.chars().count());
-                state.cursor.set_char_range(Some(egui::text::CCursorRange::one(ccursor)));
-                state.store(ui.ctx(), id);
-            }
-            self.focus_cmd = false;
-        }
-        let focused = resp.has_focus();
-        let (enter, esc, up, down) = ui.input(|i| {
-            (
-                i.key_pressed(Key::Enter),
-                i.key_pressed(Key::Escape),
-                i.key_pressed(Key::ArrowUp),
-                i.key_pressed(Key::ArrowDown),
-            )
-        });
-        if resp.lost_focus() && enter {
-            let input = std::mem::take(&mut self.cmd);
-            match self.suggestion.take().and_then(|i| suggestions.get(i)) {
-                Some(pick) => self.execute(&pick.key),
-                None if !input.trim().is_empty() => self.execute(&input),
-                None => {}
-            }
-            self.cmd_hist_pos = None;
-            // The command line stays live, Bloomberg-style.
-            self.focus_cmd = true;
-        } else if focused && esc {
-            self.cmd.clear();
-            resp.surrender_focus();
-        } else if focused && (up || down) && !self.cmd_history.is_empty() {
-            let n = self.cmd_history.len();
-            let pos = match (self.cmd_hist_pos, up) {
-                (None, true) => n - 1,
-                (Some(p), true) => p.saturating_sub(1),
-                (Some(p), false) if p + 1 < n => p + 1,
-                _ => {
-                    self.cmd_hist_pos = None;
-                    self.cmd.clear();
-                    return focused;
-                }
-            };
-            self.cmd_hist_pos = Some(pos);
-            self.cmd = self.cmd_history[pos].clone();
-        }
-        if focused && !self.cmd.is_empty() {
-            self.dropdown(ui.ctx(), cmd_rect, &suggestions);
-        }
-        let hint = command::hint(&self.cmd);
-        p.text(
-            pos2(cmd_rect.left() + 2.0, rect.top() + 32.0),
-            Align2::LEFT_CENTER,
-            hint,
-            mono(11.0),
-            if self.cmd.is_empty() { MUTED } else { TEXT },
-        );
-        focused
-    }
-
-    /// Security suggestions for what is typed, unless it is a function command.
-    fn suggestions(&self) -> Vec<SearchHit> {
-        let q = self.cmd.trim();
-        if q.is_empty() || matches!(command::parse(q), Some(Command::Function(_) | Command::SymbolFunction(..))) {
-            return Vec::new();
-        }
-        let net: &[SearchHit] = if self.net_hits.0 == q { &self.net_hits.1 } else { &[] };
-        let mut v = markets_view::merged_hits(q, net);
-        v.truncate(8);
-        v
-    }
-
-    fn dropdown(&mut self, ctx: &egui::Context, below: Rect, hits: &[SearchHit]) {
-        if hits.is_empty() {
-            return;
-        }
-        let mut clicked = None;
-        egui::Area::new(egui::Id::new("cmd-suggestions"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(below.left_bottom() + vec2(0.0, 2.0))
-            .show(ctx, |ui| {
-                egui::Frame::new()
-                    .fill(Color32::from_rgb(14, 12, 4))
-                    .stroke(Stroke::new(1.0, AMBER_DIM))
-                    .inner_margin(4.0)
-                    .show(ui, |ui| {
-                        ui.set_width(below.width().min(640.0));
-                        for (i, h) in hits.iter().enumerate() {
-                            let selected = self.suggestion == Some(i);
-                            let text = format!("{:<20} {:<6} {}", h.key, h.class.label(), h.name);
-                            let mut rt = RichText::new(text).font(mono(12.5)).color(markets_view::class_color(h.class));
-                            if selected {
-                                rt = rt.background_color(Color32::from_rgb(80, 60, 0));
-                            }
-                            let r = ui.add(egui::Label::new(rt).extend().sense(egui::Sense::click()));
-                            if r.hovered() {
-                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                            }
-                            if r.clicked() {
-                                clicked = Some(h.key.clone());
-                            }
-                        }
-                        ui.label(RichText::new("↑/↓ select · Tab complete · Enter load").font(mono(10.5)).color(MUTED));
-                    });
-            });
-        if let Some(key) = clicked {
-            self.cmd.clear();
-            self.suggestion = None;
-            self.execute(&key);
-            self.focus_cmd = true;
-        }
-    }
-
-    fn bottom_bar(&self, ui: &Ui, rect: Rect) {
-        let p = ui.painter_at(rect);
-        p.rect_filled(rect, 0.0, theme::PANEL);
-        let keys = [
-            ("F1", "HELP"),
-            ("F2", "CONG"),
-            ("F3", "POL"),
-            ("F4", "ALRT"),
-            ("F5", "WL"),
-            ("F6", "SYNC"),
-            ("TAB", "PANE"),
-            ("ALT+T/H/V/F", "DRAW"),
-            ("ALT+R", "RESET"),
-        ];
-        let mut x = rect.left() + 4.0;
-        for (k, label) in keys {
-            let g = p.layout_no_wrap(k.to_string(), mono(11.0), Color32::BLACK);
-            let box_r = Rect::from_min_size(pos2(x, rect.top() + 3.0), vec2(g.size().x + 6.0, rect.height() - 6.0));
-            p.rect_filled(box_r, 0.0, theme::ORANGE_BAR);
-            p.galley(pos2(x + 3.0, rect.center().y - g.size().y / 2.0), g, Color32::BLACK);
-            x = box_r.right() + 3.0;
-            let g = p.layout_no_wrap(label.to_string(), mono(11.0), TEXT);
-            p.galley(pos2(x, rect.center().y - g.size().y / 2.0), g.clone(), TEXT);
-            x += g.size().x + 10.0;
-        }
-        let status = if self.show_perf {
-            format!(
-                "UI {:.2} ms  frame {:.1} ms ({:.0} fps)   {}",
-                self.perf_cpu_ms,
-                self.perf_dt_ms,
-                1000.0 / self.perf_dt_ms.max(0.1),
-                self.status
-            )
-        } else {
-            self.status.clone()
-        };
-        p.text(pos2(rect.right() - 6.0, rect.center().y), Align2::RIGHT_CENTER, status, mono(11.0), AMBER);
-    }
-
-    fn pane_frame(ui: &Ui, rect: Rect, title: &str, focused: bool) -> Rect {
-        let p = ui.painter_at(rect);
-        p.rect_filled(rect, 0.0, theme::BG);
-        let bar = Rect::from_min_size(rect.min, vec2(rect.width(), PANE_TITLE_H));
-        p.rect_filled(bar, 0.0, if focused { Color32::from_rgb(70, 50, 0) } else { theme::HEADER });
-        p.text(bar.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, title, mono(12.0), AMBER);
-        if focused {
-            p.rect_stroke(rect, 0.0, Stroke::new(1.0, theme::FOCUS), StrokeKind::Inside);
-        }
-        Rect::from_min_max(pos2(rect.left() + 4.0, bar.bottom() + 2.0), pos2(rect.right() - 4.0, rect.bottom() - 2.0))
-    }
-
     fn watchlist(&mut self, ui: &mut Ui) -> Vec<Action> {
         let mut out = Vec::new();
         ui.add(
             egui::Label::new(
                 RichText::new("SECURITY             LAST       CHG    CHG%")
                     .font(mono(11.5))
-                    .color(AMBER)
-                    .background_color(theme::HEADER),
+                    .color(amber())
+                    .background_color(theme::header()),
             )
             .extend(),
         );
@@ -1046,7 +840,7 @@ impl TerminalApp {
                 let sec = tr_data::security(s);
                 let label = format!("{:<8} {:<6}", sec.ticker, sec.class.yellow_key().label());
                 let r = ui.add(
-                    egui::Label::new(RichText::new(label).font(mono(12.5)).color(AMBER))
+                    egui::Label::new(RichText::new(label).font(mono(12.5)).color(amber()))
                         .extend()
                         .sense(egui::Sense::click()),
                 );
@@ -1058,7 +852,7 @@ impl TerminalApp {
                 }
                 match self.quotes.get(s) {
                     Some(q) => {
-                        let c = if q.change() >= 0.0 { theme::UP } else { theme::DOWN };
+                        let c = if q.change() >= 0.0 { theme::up() } else { theme::down() };
                         let d = sec.decimals(q.last);
                         let text = format!(
                             "{:>11.d$} {:>9} {:>+7.2}%",
@@ -1069,7 +863,7 @@ impl TerminalApp {
                         ui.add(egui::Label::new(RichText::new(text).font(mono(12.5)).color(c)).extend());
                     }
                     None => {
-                        ui.label(RichText::new("       …").font(mono(12.5)).color(MUTED));
+                        ui.label(RichText::new("       …").font(mono(12.5)).color(muted()));
                     }
                 }
             });
@@ -1080,7 +874,7 @@ impl TerminalApp {
         ui.label(
             RichText::new("WL ADD <KEY> (e.g. WL ADD SOLUSD CRNCY) · right-click to remove · click to chart")
                 .font(mono(10.5))
-                .color(MUTED),
+                .color(muted()),
         );
         out
     }
@@ -1121,12 +915,12 @@ CHART HOTKEYS (focused chart)
 DATA  crypto: Binance/Coinbase · yields: Treasury.gov (FRED) · FX/indices/futures/ETFs/stocks: Yahoo
       (Alpaca for stocks with APCA_API_KEY_ID/APCA_API_SECRET_KEY) · TR_PROVIDER=sample offline.";
         egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-            ui.label(RichText::new(HELP).font(mono(12.0)).color(TEXT));
+            ui.label(RichText::new(HELP).font(mono(12.0)).color(text()));
         });
     }
 
     fn periodic(&mut self) {
-        let visible_wl = self.panes.iter().any(|p| matches!(p.kind, PaneKind::Watchlist));
+        let visible_wl = self.sidebar_open || self.panes.iter().any(|p| matches!(p.kind, PaneKind::Watchlist));
         if visible_wl && self.last_quotes.is_none_or(|t| t.elapsed() > Duration::from_secs(20)) {
             self.worker.send(Request::Quotes(self.watchlist.clone()));
             self.last_quotes = Some(Instant::now());
@@ -1160,24 +954,33 @@ DATA  crypto: Binance/Coinbase · yields: Treasury.gov (FRED) · FX/indices/futu
         }
         self.toasts.retain(|(_, t)| t.elapsed() < Duration::from_secs(10));
     }
+}
 
-    fn toasts(&self, ctx: &egui::Context) {
-        let screen = ctx.content_rect();
-        let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("toasts")));
-        for (k, (msg, _)) in self.toasts.iter().enumerate() {
-            let r = Rect::from_min_size(
-                pos2(screen.right() - 470.0, screen.top() + 48.0 + k as f32 * 30.0),
-                vec2(460.0, 26.0),
-            );
-            p.rect_filled(r, 0.0, Color32::from_rgb(60, 40, 0));
-            p.rect_stroke(r, 0.0, Stroke::new(1.0, AMBER), StrokeKind::Inside);
-            p.text(r.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, format!("ALERT  {msg}"), mono(12.0), AMBER);
-        }
-    }
+/// Apply the native macOS window chrome (unified toolbar, inset traffic lights, sidebar
+/// vibrancy). Returns whether the window is now translucent.
+#[cfg(target_os = "macos")]
+fn style_native_window(frame: &eframe::Frame) -> bool {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let vibrancy = std::env::var("TR_VIBRANCY").map_or(true, |v| v != "0");
+    let Ok(handle) = frame.window_handle() else { return false };
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else { return false };
+    // SAFETY: called on the main thread (eframe runs `ui` there) with a live NSView.
+    let ok = unsafe { tr_macos::style_window(h.ns_view.as_ptr(), vibrancy) };
+    tracing::info!("macOS window chrome applied: {ok} (vibrancy {vibrancy})");
+    ok && vibrancy
+}
+
+#[cfg(not(target_os = "macos"))]
+fn style_native_window(_frame: &eframe::Frame) -> bool {
+    false
 }
 
 impl eframe::App for TerminalApp {
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        if self.vibrancy { [0.0; 4] } else { visuals.window_fill.to_normalized_gamma_f32() }
+    }
+
+    fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         let frame_start = Instant::now();
         if let Some(prev) = self.last_frame.replace(frame_start) {
             let dt = prev.elapsed().as_secs_f64() * 1e3;
@@ -1187,21 +990,58 @@ impl eframe::App for TerminalApp {
         self.drain();
         self.periodic();
 
+        if !self.window_styled {
+            self.window_styled = true;
+            self.vibrancy = style_native_window(frame);
+        }
+        if self.last_accent_poll.is_none_or(|t| t.elapsed() > Duration::from_secs(3)) {
+            if let Some([r, g, b]) = tr_macos::accent_color() {
+                self.accent = Color32::from_rgb(r, g, b);
+            }
+            self.last_accent_poll = Some(Instant::now());
+        }
+        theme::refresh(&ctx, self.accent);
+
         let screen = ui.max_rect();
-        ui.painter().rect_filled(screen, 0.0, theme::BG);
-        let top = Rect::from_min_size(screen.min, vec2(screen.width(), TOP_H));
-        let bottom = Rect::from_min_max(pos2(screen.left(), screen.bottom() - BOTTOM_H), screen.max);
+        let open = anim::spring_with(
+            &ctx,
+            egui::Id::new("sidebar-open"),
+            if self.sidebar_open { 1.0 } else { 0.0 },
+            0.32,
+            0.9,
+        );
+        let sb_w = (SIDEBAR_W * open).round();
+        let main = Rect::from_min_max(pos2(screen.left() + sb_w, screen.top()), screen.max);
+        ui.painter().rect_filled(main, 0.0, theme::window());
+        let toolbar = Rect::from_min_size(main.min, vec2(main.width(), TOOLBAR_H));
+        let status = Rect::from_min_max(pos2(main.left(), main.bottom() - STATUS_H), main.max);
         let area = Rect::from_min_max(
-            pos2(screen.left() + 2.0, top.bottom() + 2.0),
-            pos2(screen.right() - 2.0, bottom.top() - 2.0),
+            pos2(main.left() + GAP, toolbar.bottom() + GAP),
+            pos2(main.right() - GAP, status.top() - GAP * 0.5),
         );
 
         self.hotkeys(&ctx);
-        self.top_bar(ui, top);
-        self.bottom_bar(ui, bottom);
+        let mut sidebar_cmds = Vec::new();
+        if sb_w >= 1.0 {
+            let full = Rect::from_min_size(
+                pos2(screen.left() + sb_w - SIDEBAR_W, screen.top()),
+                vec2(SIDEBAR_W, screen.height()),
+            );
+            let mut child = ui.new_child(UiBuilder::new().max_rect(full).id_salt("sidebar-root"));
+            child.set_clip_rect(Rect::from_min_max(screen.min, pos2(screen.left() + sb_w, screen.bottom())));
+            sidebar_cmds = self.sidebar(&mut child, full);
+        }
+        self.toolbar(ui, toolbar, (TRAFFIC_INSET - sb_w).max(0.0));
+        self.status_bar(ui, status);
 
-        let rects = self.layout.rects(area, 3.0);
+        let rects = self.layout.rects(area, GAP);
         let mut actions = Vec::new();
+        for c in sidebar_cmds {
+            match c {
+                SidebarCmd::Action(a) => actions.push(a),
+                SidebarCmd::Function(f) => self.apply(f),
+            }
+        }
         let mut new_focus = None;
         for (i, rect) in rects.into_iter().enumerate() {
             let focused = i == self.focus;
@@ -1211,10 +1051,11 @@ impl eframe::App for TerminalApp {
                     if c.show(ui, rect, focused, &self.worker) {
                         new_focus = Some(i);
                     }
+                    actions.append(&mut c.actions);
                 }
                 kind => {
                     let title = kind.title();
-                    let inner = Self::pane_frame(ui, rect, &title, focused);
+                    let inner = Self::pane_card(ui, rect, &title, focused, pane.id);
                     let mut child = ui.new_child(UiBuilder::new().max_rect(inner).id_salt(("pane", pane.id)));
                     child.set_clip_rect(inner);
                     match kind {
@@ -1226,7 +1067,7 @@ impl eframe::App for TerminalApp {
                         )),
                         PaneKind::Ticker { symbol, trades, loading } => {
                             if *loading {
-                                child.label(RichText::new("Loading…").color(MUTED));
+                                child.label(RichText::new("Loading…").color(muted()));
                             } else {
                                 actions.extend(congress_view::ticker_trades(&mut child, symbol, trades));
                             }

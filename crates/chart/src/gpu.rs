@@ -57,6 +57,9 @@ pub struct Style {
     pub vol_max: f32,
     pub hist_width_bars: f32,
     pub baseline: f32,
+    /// Physical pixels per logical point (2.0 on Retina). Pixel-sized strokes are given
+    /// in points and scaled by this; pane sizes in [`PaneTransform`] are physical.
+    pub pixels_per_point: f32,
 }
 
 impl Default for Style {
@@ -73,6 +76,7 @@ impl Default for Style {
             vol_max: 1.0,
             hist_width_bars: 0.7,
             baseline: 0.0,
+            pixels_per_point: 1.0,
         }
     }
 }
@@ -86,7 +90,12 @@ impl Uniforms {
             up: s.up,
             down: s.down,
             color: s.color,
-            params: [s.body_frac, s.wick_px, s.thickness_px, if s.ohlc_bars { 1.0 } else { 0.0 }],
+            params: [
+                s.body_frac,
+                s.wick_px * s.pixels_per_point,
+                s.thickness_px * s.pixels_per_point,
+                if s.ohlc_bars { 1.0 } else { 0.0 },
+            ],
             extra: [s.vol_frac, s.vol_max, s.hist_width_bars, s.baseline],
         }
     }
