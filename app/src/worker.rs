@@ -23,18 +23,57 @@ use crate::theme;
 pub type PaneId = u64;
 
 pub enum Request {
-    History { pane: PaneId, generation: u64, symbol: String, tf: Timeframe, limit: usize },
+    History {
+        pane: PaneId,
+        generation: u64,
+        symbol: String,
+        tf: Timeframe,
+        limit: usize,
+    },
     /// Prepend older history to `existing`.
-    MoreHistory { pane: PaneId, generation: u64, symbol: String, tf: Timeframe, existing: Arc<Vec<Bar>>, limit: usize },
-    Indicators { pane: PaneId, generation: u64, bars: Arc<Vec<Bar>>, tf: Timeframe, specs: Vec<IndicatorSpec> },
-    Compare { pane: PaneId, generation: u64, symbol: String, tf: Timeframe, base: Arc<Vec<Bar>> },
-    Markers { pane: PaneId, symbol: String },
+    MoreHistory {
+        pane: PaneId,
+        generation: u64,
+        symbol: String,
+        tf: Timeframe,
+        existing: Arc<Vec<Bar>>,
+        limit: usize,
+    },
+    Indicators {
+        pane: PaneId,
+        generation: u64,
+        bars: Arc<Vec<Bar>>,
+        tf: Timeframe,
+        specs: Vec<IndicatorSpec>,
+    },
+    Compare {
+        pane: PaneId,
+        generation: u64,
+        symbol: String,
+        tf: Timeframe,
+        base: Arc<Vec<Bar>>,
+    },
+    Markers {
+        pane: PaneId,
+        symbol: String,
+    },
     Quotes(Vec<String>),
-    Latest { limit: usize },
-    TickerTrades { pane: PaneId, symbol: String },
-    Profile { pane: PaneId, query: String },
+    Latest {
+        limit: usize,
+    },
+    TickerTrades {
+        pane: PaneId,
+        symbol: String,
+    },
+    Profile {
+        pane: PaneId,
+        query: String,
+    },
     SearchPoliticians(String),
-    Track { query: String, on: bool },
+    Track {
+        query: String,
+        on: bool,
+    },
     Alerts,
     MarkAlertsSeen,
     RefreshCongress,
@@ -66,14 +105,39 @@ pub enum Response {
         from_cache: bool,
         exhausted: bool,
     },
-    HistoryError { pane: PaneId, generation: u64, error: String },
-    Indicators { pane: PaneId, generation: u64, built: Vec<BuiltIndicator> },
-    Compare { pane: PaneId, generation: u64, symbol: String, line: LineRef },
-    Markers { pane: PaneId, symbol: String, trades: Vec<Trade> },
+    HistoryError {
+        pane: PaneId,
+        generation: u64,
+        error: String,
+    },
+    Indicators {
+        pane: PaneId,
+        generation: u64,
+        built: Vec<BuiltIndicator>,
+    },
+    Compare {
+        pane: PaneId,
+        generation: u64,
+        symbol: String,
+        line: LineRef,
+    },
+    Markers {
+        pane: PaneId,
+        symbol: String,
+        trades: Vec<Trade>,
+    },
     Quotes(Vec<Quote>),
     Latest(Vec<Trade>),
-    TickerTrades { pane: PaneId, symbol: String, trades: Vec<Trade> },
-    Profile { pane: PaneId, profile: Option<Box<Profile>>, query: String },
+    TickerTrades {
+        pane: PaneId,
+        symbol: String,
+        trades: Vec<Trade>,
+    },
+    Profile {
+        pane: PaneId,
+        profile: Option<Box<Profile>>,
+        query: String,
+    },
     Politicians(Vec<PoliticianSummary>),
     Alerts(Vec<Alert>),
     NewAlerts(Vec<NewTradeAlert>),
@@ -110,7 +174,10 @@ pub fn data_dir() -> PathBuf {
     if cfg!(target_os = "macos") {
         home.join("Library/Application Support/terminal-rs")
     } else {
-        std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".local/share")).join("terminal-rs")
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".local/share"))
+            .join("terminal-rs")
     }
 }
 
@@ -122,8 +189,13 @@ impl Worker {
             tracing::warn!("congress db unavailable ({e:#}); using in-memory store");
             Db::open_in_memory()
         })?;
-        let cache = BarCache::open(dir.join("bars.sqlite3")).map_err(|e| tracing::warn!("bar cache unavailable: {e:#}")).ok();
-        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().thread_name("tr-worker").build()?;
+        let cache =
+            BarCache::open(dir.join("bars.sqlite3")).map_err(|e| tracing::warn!("bar cache unavailable: {e:#}")).ok();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .thread_name("tr-worker")
+            .build()?;
         let (tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel::<Request>();
         let (out, rx) = mpsc::channel();
         let shared = Arc::new(Shared { provider, cache: std::sync::Mutex::new(cache), db: Mutex::new(db), out, ctx });
@@ -202,7 +274,9 @@ pub fn build_indicators(bars: &[Bar], tf: Timeframe, specs: &[IndicatorSpec]) ->
             let overlays = match *spec {
                 IndicatorSpec::Sma(n) => vec![(spec.label(), overlay(&indicators::sma(&closes, n), c, LineKind::Line))],
                 IndicatorSpec::Ema(n) => vec![(spec.label(), overlay(&indicators::ema(&closes, n), c, LineKind::Line))],
-                IndicatorSpec::Vwap => vec![(spec.label(), overlay(&indicators::vwap_by(bars, session_key(tf)), c, LineKind::Line))],
+                IndicatorSpec::Vwap => {
+                    vec![(spec.label(), overlay(&indicators::vwap_by(bars, session_key(tf)), c, LineKind::Line))]
+                }
                 IndicatorSpec::Bollinger(n, k) => {
                     let b = indicators::bollinger(&closes, n, k);
                     let dim = c.gamma_multiply(0.7);
@@ -212,7 +286,9 @@ pub fn build_indicators(bars: &[Bar], tf: Timeframe, specs: &[IndicatorSpec]) ->
                         ("BB lower".into(), overlay(&b.lower, dim, LineKind::Line)),
                     ]
                 }
-                IndicatorSpec::Rsi(n) => vec![(spec.label(), overlay(&indicators::rsi(&closes, n), theme::IND, LineKind::Line))],
+                IndicatorSpec::Rsi(n) => {
+                    vec![(spec.label(), overlay(&indicators::rsi(&closes, n), theme::IND, LineKind::Line))]
+                }
                 IndicatorSpec::Macd(f, sl, sg) => {
                     let m = indicators::macd(&closes, f, sl, sg);
                     vec![
@@ -265,19 +341,39 @@ async fn handle(s: &Shared, req: Request) {
             if let Some(bars) = cached.filter(|b| !b.is_empty()) {
                 let bars = Arc::new(bars);
                 let gpu = build_gpu(bars.clone()).await;
-                s.send(Response::History { pane, generation, symbol: symbol.clone(), tf, bars, gpu, prepended: 0, from_cache: true, exhausted: false });
+                s.send(Response::History {
+                    pane,
+                    generation,
+                    symbol: symbol.clone(),
+                    tf,
+                    bars,
+                    gpu,
+                    prepended: 0,
+                    from_cache: true,
+                    exhausted: false,
+                });
             }
             match s.provider.history(&symbol, tf, None, limit).await {
                 Ok(bars) if !bars.is_empty() => {
-                    if let Ok(mut c) = s.cache.lock() {
-                        if let Some(c) = c.as_mut() {
-                            let _ = c.store(&symbol, tf, &bars);
-                        }
+                    if let Ok(mut c) = s.cache.lock()
+                        && let Some(c) = c.as_mut()
+                    {
+                        let _ = c.store(&symbol, tf, &bars);
                     }
                     let exhausted = bars.len() < limit / 2;
                     let bars = Arc::new(bars);
                     let gpu = build_gpu(bars.clone()).await;
-                    s.send(Response::History { pane, generation, symbol, tf, bars, gpu, prepended: 0, from_cache: false, exhausted });
+                    s.send(Response::History {
+                        pane,
+                        generation,
+                        symbol,
+                        tf,
+                        bars,
+                        gpu,
+                        prepended: 0,
+                        from_cache: false,
+                        exhausted,
+                    });
                 }
                 Ok(_) => s.send(Response::HistoryError { pane, generation, error: format!("no data for {symbol}") }),
                 Err(e) => s.send(Response::HistoryError { pane, generation, error: format!("{e:#}") }),
@@ -293,13 +389,24 @@ async fn handle(s: &Shared, req: Request) {
                     merged.extend_from_slice(&existing);
                     let bars = Arc::new(merged);
                     let gpu = build_gpu(bars.clone()).await;
-                    s.send(Response::History { pane, generation, symbol, tf, bars, gpu, prepended, from_cache: false, exhausted: prepended == 0 });
+                    s.send(Response::History {
+                        pane,
+                        generation,
+                        symbol,
+                        tf,
+                        bars,
+                        gpu,
+                        prepended,
+                        from_cache: false,
+                        exhausted: prepended == 0,
+                    });
                 }
                 Err(e) => s.send(Response::HistoryError { pane, generation, error: format!("{e:#}") }),
             }
         }
         Request::Indicators { pane, generation, bars, tf, specs } => {
-            let built = tokio::task::spawn_blocking(move || build_indicators(&bars, tf, &specs)).await.unwrap_or_default();
+            let built =
+                tokio::task::spawn_blocking(move || build_indicators(&bars, tf, &specs)).await.unwrap_or_default();
             s.send(Response::Indicators { pane, generation, built });
         }
         Request::Compare { pane, generation, symbol, tf, base } => {
@@ -449,7 +556,11 @@ mod tests {
     #[test]
     fn indicators_build_expected_overlays() {
         let bars = tr_core::sample::generate("X", Timeframe::D1, 300, 1_790_000_000);
-        let built = build_indicators(&bars, Timeframe::D1, &[IndicatorSpec::Bollinger(20, 2.0), IndicatorSpec::Macd(12, 26, 9), IndicatorSpec::Vwap]);
+        let built = build_indicators(
+            &bars,
+            Timeframe::D1,
+            &[IndicatorSpec::Bollinger(20, 2.0), IndicatorSpec::Macd(12, 26, 9), IndicatorSpec::Vwap],
+        );
         assert_eq!(built[0].overlays.len(), 3);
         assert_eq!(built[1].overlays[0].1.kind, LineKind::Hist);
         assert_eq!(built[2].overlays.len(), 1);

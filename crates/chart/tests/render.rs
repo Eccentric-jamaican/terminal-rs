@@ -8,12 +8,12 @@ use tr_core::{Timeframe, indicators, sample};
 
 fn dump_ppm(path: &str, w: u32, h: u32, rgba: &[u8]) {
     let mut out = format!("P6 {w} {h} 255\n").into_bytes();
-    out.extend(rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]));
+    out.extend(rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]));
     std::fs::write(path, out).unwrap();
 }
 
 fn count(px: &[u8], pred: impl Fn(&[u8]) -> bool) -> usize {
-    px.chunks_exact(4).filter(|p| pred(p)).count()
+    px.as_chunks::<4>().0.iter().filter(|p| pred(p.as_slice())).count()
 }
 
 #[test]
@@ -26,7 +26,12 @@ fn renders_candles_volume_lines_and_hist() {
     let bars = sample::generate("AAPL", Timeframe::D1, 2_000, 1_790_000_000);
     let series = SeriesGpu::build(&bars);
     let closes: Vec<f64> = bars.iter().map(|b| b.close).collect();
-    let overlays = [Overlay { line: line_ref(&indicators::sma(&closes, 20)), color: [0.0, 0.6, 1.0, 1.0], kind: LineKind::Line, scale: 1.0 }];
+    let overlays = [Overlay {
+        line: line_ref(&indicators::sma(&closes, 20)),
+        color: [0.0, 0.6, 1.0, 1.0],
+        kind: LineKind::Line,
+        scale: 1.0,
+    }];
     let v = Viewport::fit_last(bars.len(), 150, 800.0);
     for ct in ChartType::ALL {
         let out = price_pane(&PricePane {

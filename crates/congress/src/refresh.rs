@@ -41,8 +41,7 @@ impl RefreshConfig {
     /// Sensible defaults derived from the database's last successful run.
     pub fn incremental(db: &Db) -> Self {
         let today = Utc::now().date_naive();
-        let last: Option<NaiveDate> =
-            db.meta("last_refresh_date").ok().flatten().and_then(|s| s.parse().ok());
+        let last: Option<NaiveDate> = db.meta("last_refresh_date").ok().flatten().and_then(|s| s.parse().ok());
         let (house_years, senate_since) = match last {
             // Re-scan a week back: filings can appear in the index late.
             Some(d) => {
@@ -177,7 +176,12 @@ async fn store(
             t
         };
         let message = if parsed.trades.is_empty() {
-            format!("{} filed a new PTR ({}) on {}", politician.name, if rec.paper { "paper" } else { "scanned" }, rec.filed_date)
+            format!(
+                "{} filed a new PTR ({}) on {}",
+                politician.name,
+                if rec.paper { "paper" } else { "scanned" },
+                rec.filed_date
+            )
         } else {
             format!("{} filed {} trade(s): {}", politician.name, parsed.trades.len(), tickers.join(", "))
         };
@@ -207,7 +211,7 @@ async fn refresh_house<S: Source>(
         todo.extend(entries.into_iter().filter(|e| e.is_ptr() && !known.contains(&format!("house:{}", e.doc_id))));
     }
     // Newest first so a capped run still gets the freshest filings.
-    todo.sort_by(|a, b| b.filing_date.cmp(&a.filing_date));
+    todo.sort_by_key(|e| std::cmp::Reverse(e.filing_date));
     todo.truncate(cfg.max_new_per_chamber);
     debug!("house: {} new PTRs to fetch", todo.len());
 
@@ -303,7 +307,7 @@ async fn refresh_senate<S: Source>(
         .into_iter()
         .filter(|r| !known.contains(&format!("senate:{}", r.id)))
         .collect();
-    todo.sort_by(|a, b| b.date_received.cmp(&a.date_received));
+    todo.sort_by_key(|r| std::cmp::Reverse(r.date_received));
     todo.truncate(cfg.max_new_per_chamber);
     debug!("senate: {} new PTRs to fetch", todo.len());
 

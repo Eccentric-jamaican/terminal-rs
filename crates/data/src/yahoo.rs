@@ -180,10 +180,15 @@ impl MarketData for YahooProvider {
         for s in symbols {
             let c = self.chart(s, "1d", now - 10 * 86_400, now + 60).await?;
             let Some(last) = c.bars.last() else { continue };
-            let prev = c.prev_close.unwrap_or_else(|| {
-                if c.bars.len() > 1 { c.bars[c.bars.len() - 2].close } else { last.open }
+            let prev = c
+                .prev_close
+                .unwrap_or_else(|| if c.bars.len() > 1 { c.bars[c.bars.len() - 2].close } else { last.open });
+            out.push(Quote {
+                symbol: s.clone(),
+                last: c.last_price.unwrap_or(last.close),
+                prev_close: prev,
+                ts: last.ts,
             });
-            out.push(Quote { symbol: s.clone(), last: c.last_price.unwrap_or(last.close), prev_close: prev, ts: last.ts });
         }
         Ok(out)
     }

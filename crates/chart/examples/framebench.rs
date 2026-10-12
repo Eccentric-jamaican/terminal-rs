@@ -28,8 +28,18 @@ fn main() {
     let closes: Vec<f64> = bars.iter().map(|b| b.close).collect();
     let series = SeriesGpu::build(&bars);
     let overlays = [
-        Overlay { line: line_ref(&indicators::ema(&closes, 20)), color: [0.0, 0.6, 1.0, 1.0], kind: LineKind::Line, scale: 1.0 },
-        Overlay { line: line_ref(&indicators::bollinger(&closes, 20, 2.0).upper), color: [0.8, 0.8, 0.8, 1.0], kind: LineKind::Line, scale: 1.0 },
+        Overlay {
+            line: line_ref(&indicators::ema(&closes, 20)),
+            color: [0.0, 0.6, 1.0, 1.0],
+            kind: LineKind::Line,
+            scale: 1.0,
+        },
+        Overlay {
+            line: line_ref(&indicators::bollinger(&closes, 20, 2.0).upper),
+            color: [0.8, 0.8, 0.8, 1.0],
+            kind: LineKind::Line,
+            scale: 1.0,
+        },
     ];
     let prep_ms = t.elapsed().as_secs_f64() * 1e3;
     println!("{n} bars: generate {gen_ms:.0} ms, pyramids+indicators {prep_ms:.0} ms");
@@ -56,7 +66,8 @@ fn main() {
     let first = render(&v);
     println!("first frame (includes GPU upload): {:.1} ms", first.1.as_secs_f64() * 1e3);
 
-    let phases: [(&str, Box<dyn Fn(&mut Viewport, usize)>); 3] = [
+    type Step = Box<dyn Fn(&mut Viewport, usize)>;
+    let phases: [(&str, Step); 3] = [
         ("zoom out to all bars", Box::new(|v: &mut Viewport, _| v.zoom(0.97, 1500.0))),
         ("pan across history", Box::new(|v: &mut Viewport, i| v.pan_px(if i < 150 { 40.0 } else { -40.0 }))),
         ("zoom in to 1 bar/8px", Box::new(|v: &mut Viewport, _| v.zoom(1.035, 800.0))),

@@ -7,11 +7,11 @@
 //! - [`scale`]: axis ticks and labels. [`drawings`]: user drawing model and hit testing.
 
 pub mod drawings;
-pub mod headless;
 pub mod gpu;
+pub mod headless;
 pub mod lod;
-pub mod scene;
 pub mod scale;
+pub mod scene;
 pub mod viewport;
 
 pub use egui_wgpu;

@@ -61,12 +61,8 @@ struct RawBar {
 /// Parse one page of `/v2/stocks/{symbol}/bars`.
 pub fn parse_bars_page(json: &str) -> Result<(Vec<Bar>, Option<String>)> {
     let page: BarsPage = serde_json::from_str(json).context("parsing Alpaca bars")?;
-    let bars = page
-        .bars
-        .unwrap_or_default()
-        .into_iter()
-        .map(|b| Bar::new(b.t.timestamp(), b.o, b.h, b.l, b.c, b.v))
-        .collect();
+    let bars =
+        page.bars.unwrap_or_default().into_iter().map(|b| Bar::new(b.t.timestamp(), b.o, b.h, b.l, b.c, b.v)).collect();
     Ok((bars, page.next_page_token.filter(|t| !t.is_empty())))
 }
 

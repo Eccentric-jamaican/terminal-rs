@@ -7,8 +7,8 @@ use egui::{Align2, Color32, Event, Key, Modifiers, Rect, RichText, Stroke, Strok
 use serde::{Deserialize, Serialize};
 use tr_chart::drawings::{Drawing, Tool};
 use tr_chart::scene::ChartType;
-use tr_congress::db::{Alert, PoliticianSummary};
 use tr_congress::Trade;
+use tr_congress::db::{Alert, PoliticianSummary};
 use tr_core::Timeframe;
 use tr_data::Quote;
 
@@ -124,7 +124,8 @@ fn settings_path() -> std::path::PathBuf {
 impl TerminalApp {
     pub fn new(ctx: &egui::Context, worker: Worker, provider: String) -> Self {
         theme::apply(ctx);
-        let settings: Option<Settings> = std::fs::read(settings_path()).ok().and_then(|b| serde_json::from_slice(&b).ok());
+        let settings: Option<Settings> =
+            std::fs::read(settings_path()).ok().and_then(|b| serde_json::from_slice(&b).ok());
         let mut app = Self {
             worker,
             provider,
@@ -145,7 +146,9 @@ impl TerminalApp {
             pol_search: String::new(),
             alerts: Vec::new(),
             congress_status: String::new(),
-            watchlist: ["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "JPM"].map(String::from).to_vec(),
+            watchlist: ["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "JPM"]
+                .map(String::from)
+                .to_vec(),
             quotes: HashMap::new(),
             last_quotes: None,
             last_feed: None,
@@ -300,7 +303,9 @@ impl TerminalApp {
         }
         let disc = |i: usize| std::mem::discriminant(&self.panes[i].kind);
         let n = self.panes.len();
-        if let Some(i) = (0..n).rev().find(|&i| !matches!(self.panes[i].kind, PaneKind::Chart(_)) && (0..n).any(|j| j != i && disc(j) == disc(i))) {
+        if let Some(i) = (0..n).rev().find(|&i| {
+            !matches!(self.panes[i].kind, PaneKind::Chart(_)) && (0..n).any(|j| j != i && disc(j) == disc(i))
+        }) {
             return i;
         }
         let candidates: Vec<usize> = (0..n).filter(|&i| !matches!(self.panes[i].kind, PaneKind::Chart(_))).collect();
@@ -350,7 +355,9 @@ impl TerminalApp {
         for a in actions {
             match a {
                 Action::OpenChart(s) => self.open_chart(&s),
-                Action::OpenTicker(s) => self.open_panel(PaneKind::Ticker { symbol: s, trades: Vec::new(), loading: true }),
+                Action::OpenTicker(s) => {
+                    self.open_panel(PaneKind::Ticker { symbol: s, trades: Vec::new(), loading: true })
+                }
                 Action::OpenProfile(q) => self.open_panel(PaneKind::Profile { query: q, data: None, loading: true }),
                 Action::Track(q, on) => {
                     self.worker.send(Request::Track { query: q.clone(), on });
@@ -434,7 +441,8 @@ impl TerminalApp {
             Function::ClosePane => {
                 if self.panes.len() > 1 {
                     self.panes.remove(self.focus);
-                    let prev = Layout::ALL.into_iter().rev().find(|l| l.slots() <= self.panes.len()).unwrap_or(Layout::One);
+                    let prev =
+                        Layout::ALL.into_iter().rev().find(|l| l.slots() <= self.panes.len()).unwrap_or(Layout::One);
                     self.layout = prev;
                     self.fit_panes_to_layout();
                 }
@@ -492,23 +500,21 @@ impl TerminalApp {
                 }
                 Response::Latest(t) => self.latest = t,
                 Response::TickerTrades { pane, symbol, trades } => {
-                    if let Some(p) = self.panes.iter_mut().find(|p| p.id == pane) {
-                        if let PaneKind::Ticker { symbol: s, trades: t, loading } = &mut p.kind {
-                            if *s == symbol {
-                                *t = trades;
-                                *loading = false;
-                            }
-                        }
+                    if let Some(p) = self.panes.iter_mut().find(|p| p.id == pane)
+                        && let PaneKind::Ticker { symbol: s, trades: t, loading } = &mut p.kind
+                        && *s == symbol
+                    {
+                        *t = trades;
+                        *loading = false;
                     }
                 }
                 Response::Profile { pane, profile, query } => {
-                    if let Some(p) = self.panes.iter_mut().find(|p| p.id == pane) {
-                        if let PaneKind::Profile { query: q, data, loading } = &mut p.kind {
-                            if *q == query {
-                                *data = profile;
-                                *loading = false;
-                            }
-                        }
+                    if let Some(p) = self.panes.iter_mut().find(|p| p.id == pane)
+                        && let PaneKind::Profile { query: q, data, loading } = &mut p.kind
+                        && *q == query
+                    {
+                        *data = profile;
+                        *loading = false;
                     }
                 }
                 Response::Politicians(list) => self.politicians = list,
@@ -535,7 +541,9 @@ impl TerminalApp {
         self.worker.send(Request::SearchPoliticians(String::new()));
         for p in &self.panes {
             match &p.kind {
-                PaneKind::Ticker { symbol, .. } => self.worker.send(Request::TickerTrades { pane: p.id, symbol: symbol.clone() }),
+                PaneKind::Ticker { symbol, .. } => {
+                    self.worker.send(Request::TickerTrades { pane: p.id, symbol: symbol.clone() })
+                }
                 PaneKind::Chart(c) => self.worker.send(Request::Markers { pane: p.id, symbol: c.symbol.clone() }),
                 _ => {}
             }
@@ -564,7 +572,9 @@ impl TerminalApp {
                 let mut out = String::new();
                 for e in &i.events {
                     match e {
-                        Event::Key { pressed: true, modifiers, .. } => chord = modifiers.alt || modifiers.ctrl || modifiers.command,
+                        Event::Key { pressed: true, modifiers, .. } => {
+                            chord = modifiers.alt || modifiers.ctrl || modifiers.command
+                        }
                         Event::Text(t) if !chord => out.push_str(t),
                         _ => {}
                     }
@@ -572,7 +582,8 @@ impl TerminalApp {
                 out
             });
             if !typed.is_empty() {
-                let starts = !self.cmd.is_empty() || typed.chars().next().is_some_and(|c| c.is_ascii_alphanumeric() || c == '^' || c == '?');
+                let starts = !self.cmd.is_empty()
+                    || typed.chars().next().is_some_and(|c| c.is_ascii_alphanumeric() || c == '^' || c == '?');
                 if starts {
                     self.cmd.push_str(&typed.to_ascii_uppercase());
                     self.focus_cmd = true;
@@ -605,7 +616,9 @@ impl TerminalApp {
         if !is_chart {
             return;
         }
-        for (k, t) in [(Key::T, Tool::Trendline), (Key::H, Tool::Horizontal), (Key::V, Tool::Vertical), (Key::F, Tool::Fib)] {
+        for (k, t) in
+            [(Key::T, Tool::Trendline), (Key::H, Tool::Horizontal), (Key::V, Tool::Vertical), (Key::F, Tool::Fib)]
+        {
             if pressed(Modifiers::ALT, k) {
                 self.with_chart(|c, _| c.start_tool(t));
             }
@@ -635,7 +648,10 @@ impl TerminalApp {
         if pressed(Modifiers::NONE, Key::ArrowRight) {
             self.with_chart(|c, _| c.pan_bars(5.0));
         }
-        if pressed(Modifiers::COMMAND, Key::ArrowUp) || pressed(Modifiers::NONE, Key::Plus) || pressed(Modifiers::NONE, Key::Equals) {
+        if pressed(Modifiers::COMMAND, Key::ArrowUp)
+            || pressed(Modifiers::NONE, Key::Plus)
+            || pressed(Modifiers::NONE, Key::Equals)
+        {
             self.with_chart(|c, _| c.zoom(1.25));
         }
         if pressed(Modifiers::COMMAND, Key::ArrowDown) || pressed(Modifiers::NONE, Key::Minus) {
@@ -655,19 +671,41 @@ impl TerminalApp {
         let clock = format!("{}  {} UTC", now.format("%a %d %b %H:%M:%S"), chrono::Utc::now().format("%H:%M"));
         p.text(pos2(rect.right() - 8.0, rect.top() + 14.0), Align2::RIGHT_CENTER, clock, mono(12.0), AMBER);
         let unread = self.alerts.iter().filter(|a| !a.seen).count();
-        let right_info = format!("LAYOUT {}  DATA {}{}", self.layout.label(), self.provider.to_uppercase(), if unread > 0 { format!("   ALERTS {unread}") } else { String::new() });
-        p.text(pos2(rect.right() - 8.0, rect.top() + 31.0), Align2::RIGHT_CENTER, right_info, mono(11.0), if unread > 0 { AMBER } else { MUTED });
+        let right_info = format!(
+            "LAYOUT {}  DATA {}{}",
+            self.layout.label(),
+            self.provider.to_uppercase(),
+            if unread > 0 { format!("   ALERTS {unread}") } else { String::new() }
+        );
+        p.text(
+            pos2(rect.right() - 8.0, rect.top() + 31.0),
+            Align2::RIGHT_CENTER,
+            right_info,
+            mono(11.0),
+            if unread > 0 { AMBER } else { MUTED },
+        );
 
-        let cmd_rect = Rect::from_min_max(pos2(logo.right() + 8.0, rect.top() + 4.0), pos2(rect.right() - 300.0, rect.top() + 24.0));
+        let cmd_rect = Rect::from_min_max(
+            pos2(logo.right() + 8.0, rect.top() + 4.0),
+            pos2(rect.right() - 300.0, rect.top() + 24.0),
+        );
         let mut child = ui.new_child(UiBuilder::new().max_rect(cmd_rect));
         let id = egui::Id::new("command-line");
         let te = egui::TextEdit::singleline(&mut self.cmd)
             .id(id)
             .font(mono(14.0))
             .text_color(AMBER)
-            .hint_text(RichText::new("<TICKER> <GO>   e.g. AAPL · NVDA CONG · POL PELOSI · RSI · 5 · LAYOUT 4").color(AMBER_DIM))
+            .hint_text(
+                RichText::new("<TICKER> <GO>   e.g. AAPL · NVDA CONG · POL PELOSI · RSI · 5 · LAYOUT 4")
+                    .color(AMBER_DIM),
+            )
             .desired_width(cmd_rect.width())
-            .frame(egui::Frame::new().fill(Color32::from_rgb(20, 16, 0)).stroke(Stroke::new(1.0, AMBER_DIM)).inner_margin(vec2(6.0, 2.0)));
+            .frame(
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(20, 16, 0))
+                    .stroke(Stroke::new(1.0, AMBER_DIM))
+                    .inner_margin(vec2(6.0, 2.0)),
+            );
         let resp = child.add(te);
         if self.focus_cmd {
             resp.request_focus();
@@ -680,7 +718,14 @@ impl TerminalApp {
             self.focus_cmd = false;
         }
         let focused = resp.has_focus();
-        let (enter, esc, up, down) = ui.input(|i| (i.key_pressed(Key::Enter), i.key_pressed(Key::Escape), i.key_pressed(Key::ArrowUp), i.key_pressed(Key::ArrowDown)));
+        let (enter, esc, up, down) = ui.input(|i| {
+            (
+                i.key_pressed(Key::Enter),
+                i.key_pressed(Key::Escape),
+                i.key_pressed(Key::ArrowUp),
+                i.key_pressed(Key::ArrowDown),
+            )
+        });
         if resp.lost_focus() && enter {
             let input = std::mem::take(&mut self.cmd);
             if !input.trim().is_empty() {
@@ -708,14 +753,30 @@ impl TerminalApp {
             self.cmd = self.cmd_history[pos].clone();
         }
         let hint = command::hint(&self.cmd);
-        p.text(pos2(cmd_rect.left() + 2.0, rect.top() + 32.0), Align2::LEFT_CENTER, hint, mono(11.0), if self.cmd.is_empty() { MUTED } else { TEXT });
+        p.text(
+            pos2(cmd_rect.left() + 2.0, rect.top() + 32.0),
+            Align2::LEFT_CENTER,
+            hint,
+            mono(11.0),
+            if self.cmd.is_empty() { MUTED } else { TEXT },
+        );
         focused
     }
 
     fn bottom_bar(&self, ui: &Ui, rect: Rect) {
         let p = ui.painter_at(rect);
         p.rect_filled(rect, 0.0, theme::PANEL);
-        let keys = [("F1", "HELP"), ("F2", "CONG"), ("F3", "POL"), ("F4", "ALRT"), ("F5", "WL"), ("F6", "SYNC"), ("TAB", "PANE"), ("ALT+T/H/V/F", "DRAW"), ("ALT+R", "RESET")];
+        let keys = [
+            ("F1", "HELP"),
+            ("F2", "CONG"),
+            ("F3", "POL"),
+            ("F4", "ALRT"),
+            ("F5", "WL"),
+            ("F6", "SYNC"),
+            ("TAB", "PANE"),
+            ("ALT+T/H/V/F", "DRAW"),
+            ("ALT+R", "RESET"),
+        ];
         let mut x = rect.left() + 4.0;
         for (k, label) in keys {
             let g = p.layout_no_wrap(k.to_string(), mono(11.0), Color32::BLACK);
@@ -744,11 +805,22 @@ impl TerminalApp {
 
     fn watchlist(&mut self, ui: &mut Ui) -> Vec<Action> {
         let mut out = Vec::new();
-        ui.add(egui::Label::new(RichText::new("SYMBOL       LAST       CHG      CHG%").font(mono(11.5)).color(AMBER).background_color(theme::HEADER)).extend());
+        ui.add(
+            egui::Label::new(
+                RichText::new("SYMBOL       LAST       CHG      CHG%")
+                    .font(mono(11.5))
+                    .color(AMBER)
+                    .background_color(theme::HEADER),
+            )
+            .extend(),
+        );
         let mut remove = None;
         for s in &self.watchlist {
             ui.horizontal(|ui| {
-                let r = ui.add(egui::Label::new(RichText::new(format!("{s:<8}")).font(mono(12.5)).color(AMBER)).sense(egui::Sense::click()));
+                let r = ui.add(
+                    egui::Label::new(RichText::new(format!("{s:<8}")).font(mono(12.5)).color(AMBER))
+                        .sense(egui::Sense::click()),
+                );
                 if r.clicked() {
                     out.push(Action::OpenChart(s.clone()));
                 }
@@ -758,7 +830,11 @@ impl TerminalApp {
                 match self.quotes.get(s) {
                     Some(q) => {
                         let c = if q.change() >= 0.0 { theme::UP } else { theme::DOWN };
-                        ui.label(RichText::new(format!("{:>10.2} {:>+9.2} {:>+8.2}%", q.last, q.change(), q.change_pct())).font(mono(12.5)).color(c));
+                        ui.label(
+                            RichText::new(format!("{:>10.2} {:>+9.2} {:>+8.2}%", q.last, q.change(), q.change_pct()))
+                                .font(mono(12.5))
+                                .color(c),
+                        );
                     }
                     None => {
                         ui.label(RichText::new("       …").font(mono(12.5)).color(MUTED));
@@ -769,7 +845,9 @@ impl TerminalApp {
         if let Some(s) = remove {
             self.watchlist.retain(|x| *x != s);
         }
-        ui.label(RichText::new("WL ADD <TICKER> · right-click to remove · click to chart").font(mono(10.5)).color(MUTED));
+        ui.label(
+            RichText::new("WL ADD <TICKER> · right-click to remove · click to chart").font(mono(10.5)).color(MUTED),
+        );
         out
     }
 
@@ -827,7 +905,10 @@ DATA  APCA_API_KEY_ID/APCA_API_SECRET_KEY -> Alpaca; otherwise Yahoo; TR_PROVIDE
         let screen = ctx.content_rect();
         let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("toasts")));
         for (k, (msg, _)) in self.toasts.iter().enumerate() {
-            let r = Rect::from_min_size(pos2(screen.right() - 470.0, screen.top() + 48.0 + k as f32 * 30.0), vec2(460.0, 26.0));
+            let r = Rect::from_min_size(
+                pos2(screen.right() - 470.0, screen.top() + 48.0 + k as f32 * 30.0),
+                vec2(460.0, 26.0),
+            );
             p.rect_filled(r, 0.0, Color32::from_rgb(60, 40, 0));
             p.rect_stroke(r, 0.0, Stroke::new(1.0, AMBER), StrokeKind::Inside);
             p.text(r.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, format!("ALERT  {msg}"), mono(12.0), AMBER);
@@ -845,7 +926,10 @@ impl eframe::App for TerminalApp {
         ui.painter().rect_filled(screen, 0.0, theme::BG);
         let top = Rect::from_min_size(screen.min, vec2(screen.width(), TOP_H));
         let bottom = Rect::from_min_max(pos2(screen.left(), screen.bottom() - BOTTOM_H), screen.max);
-        let area = Rect::from_min_max(pos2(screen.left() + 2.0, top.bottom() + 2.0), pos2(screen.right() - 2.0, bottom.top() - 2.0));
+        let area = Rect::from_min_max(
+            pos2(screen.left() + 2.0, top.bottom() + 2.0),
+            pos2(screen.right() - 2.0, bottom.top() - 2.0),
+        );
 
         self.hotkeys(&ctx);
         self.top_bar(ui, top);
@@ -869,7 +953,12 @@ impl eframe::App for TerminalApp {
                     let mut child = ui.new_child(UiBuilder::new().max_rect(inner).id_salt(("pane", pane.id)));
                     child.set_clip_rect(inner);
                     match kind {
-                        PaneKind::Feed => actions.extend(congress_view::feed(&mut child, &self.latest, &mut self.feed_filter, &self.congress_status)),
+                        PaneKind::Feed => actions.extend(congress_view::feed(
+                            &mut child,
+                            &self.latest,
+                            &mut self.feed_filter,
+                            &self.congress_status,
+                        )),
                         PaneKind::Ticker { symbol, trades, loading } => {
                             if *loading {
                                 child.label(RichText::new("Loading…").color(MUTED));
@@ -877,8 +966,14 @@ impl eframe::App for TerminalApp {
                                 actions.extend(congress_view::ticker_trades(&mut child, symbol, trades));
                             }
                         }
-                        PaneKind::Profile { query, data, loading } => actions.extend(congress_view::profile(&mut child, query, data.as_deref(), *loading)),
-                        PaneKind::Politicians => actions.extend(congress_view::politicians(&mut child, &self.politicians, &mut self.pol_search)),
+                        PaneKind::Profile { query, data, loading } => {
+                            actions.extend(congress_view::profile(&mut child, query, data.as_deref(), *loading))
+                        }
+                        PaneKind::Politicians => actions.extend(congress_view::politicians(
+                            &mut child,
+                            &self.politicians,
+                            &mut self.pol_search,
+                        )),
                         PaneKind::Alerts => {
                             let (a, seen) = congress_view::alerts(&mut child, &self.alerts);
                             actions.extend(a);
@@ -895,7 +990,9 @@ impl eframe::App for TerminalApp {
                         let wl = self.watchlist(&mut child);
                         actions.extend(wl);
                     }
-                    let clicked = ui.input(|inp| inp.pointer.primary_pressed() && inp.pointer.interact_pos().is_some_and(|p| rect.contains(p)));
+                    let clicked = ui.input(|inp| {
+                        inp.pointer.primary_pressed() && inp.pointer.interact_pos().is_some_and(|p| rect.contains(p))
+                    });
                     if clicked {
                         new_focus = Some(i);
                     }

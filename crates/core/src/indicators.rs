@@ -64,11 +64,7 @@ pub fn rsi(closes: &[f64], n: usize) -> Vec<f64> {
     let al = rma(&losses, n);
     for i in (n - 1)..gains.len() {
         let (g, l) = (ag[i], al[i]);
-        out[i + 1] = if l == 0.0 {
-            if g == 0.0 { 50.0 } else { 100.0 }
-        } else {
-            100.0 - 100.0 / (1.0 + g / l)
-        };
+        out[i + 1] = if l == 0.0 { if g == 0.0 { 50.0 } else { 100.0 } } else { 100.0 - 100.0 / (1.0 + g / l) };
     }
     out
 }
@@ -158,10 +154,7 @@ mod tests {
     fn assert_series(got: &[f64], want: &[f64]) {
         assert_eq!(got.len(), want.len());
         for (i, (g, w)) in got.iter().zip(want).enumerate() {
-            assert!(
-                (g.is_nan() && w.is_nan()) || close_to(*g, *w),
-                "index {i}: got {g}, want {w}"
-            );
+            assert!((g.is_nan() && w.is_nan()) || close_to(*g, *w), "index {i}: got {g}, want {w}");
         }
     }
 
@@ -186,8 +179,8 @@ mod tests {
     fn rsi_reference_values() {
         // Wilder's original 14-period example (New Concepts in Technical Trading Systems).
         let closes = [
-            44.34, 44.09, 44.15, 43.61, 44.33, 44.83, 45.10, 45.42, 45.84, 46.08, 45.89, 46.03, 45.61, 46.28,
-            46.28, 46.00, 46.03, 46.41, 46.22, 45.64,
+            44.34, 44.09, 44.15, 43.61, 44.33, 44.83, 45.10, 45.42, 45.84, 46.08, 45.89, 46.03, 45.61, 46.28, 46.28,
+            46.00, 46.03, 46.41, 46.22, 45.64,
         ];
         let r = rsi(&closes, 14);
         assert!(r[13].is_nan());

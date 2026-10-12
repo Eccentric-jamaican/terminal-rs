@@ -133,10 +133,7 @@ impl AmountRange {
     /// Parse `$1,001 - $15,000`, `Over $50,000,000`, `Spouse/DC Over $1,000,000`,
     /// and line-wrapped forms such as `$15,001 -\n$50,000`.
     pub fn parse(s: &str) -> Option<Self> {
-        let nums: Vec<u64> = DOLLARS
-            .captures_iter(s)
-            .filter_map(|c| c[1].replace(',', "").parse().ok())
-            .collect();
+        let nums: Vec<u64> = DOLLARS.captures_iter(s).filter_map(|c| c[1].replace(',', "").parse().ok()).collect();
         let over = s.to_ascii_lowercase().contains("over");
         match (nums.as_slice(), over) {
             ([n], true) => Some(Self { min: n + 1, max: None }),
@@ -255,10 +252,7 @@ mod tests {
         assert_eq!(AmountRange::parse("$1,001 - $15,000"), Some(AmountRange { min: 1001, max: Some(15000) }));
         assert_eq!(AmountRange::parse("$15,001 -\n$50,000"), Some(AmountRange { min: 15001, max: Some(50000) }));
         assert_eq!(AmountRange::parse("Over $50,000,000"), Some(AmountRange { min: 50_000_001, max: None }));
-        assert_eq!(
-            AmountRange::parse("Spouse/DC Over $1,000,000"),
-            Some(AmountRange { min: 1_000_001, max: None })
-        );
+        assert_eq!(AmountRange::parse("Spouse/DC Over $1,000,000"), Some(AmountRange { min: 1_000_001, max: None }));
         assert_eq!(AmountRange::parse("--"), None);
         let r = AmountRange::parse("$1,001 - $15,000").unwrap();
         assert_eq!(r.to_string(), "$1K-$15K");

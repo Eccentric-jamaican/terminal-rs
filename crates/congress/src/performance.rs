@@ -64,7 +64,11 @@ pub fn estimate(
         scored: out.len(),
         unscored,
         weighted_return: if wsum > 0.0 { out.iter().map(|r| r.ret * r.weight).sum::<f64>() / wsum } else { 0.0 },
-        hit_rate: if out.is_empty() { 0.0 } else { out.iter().filter(|r| r.ret > 0.0).count() as f64 / out.len() as f64 },
+        hit_rate: if out.is_empty() {
+            0.0
+        } else {
+            out.iter().filter(|r| r.ret > 0.0).count() as f64 / out.len() as f64
+        },
         avg_lag_days: if trades.is_empty() {
             0.0
         } else {
@@ -109,8 +113,15 @@ mod tests {
         ];
         let (p, rs) = estimate(
             &trades,
-            |tk, _| match tk { "UP" | "DOWN" => Some(100.0), _ => None },
-            |tk| match tk { "UP" => Some(110.0), "DOWN" => Some(80.0), _ => None },
+            |tk, _| match tk {
+                "UP" | "DOWN" => Some(100.0),
+                _ => None,
+            },
+            |tk| match tk {
+                "UP" => Some(110.0),
+                "DOWN" => Some(80.0),
+                _ => None,
+            },
         );
         assert_eq!(p.scored, 2);
         assert_eq!(p.unscored, 1);

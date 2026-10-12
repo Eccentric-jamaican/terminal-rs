@@ -38,17 +38,16 @@ pub struct Roster {
 pub fn normalize_name(s: &str) -> Vec<String> {
     s.split(|c: char| c.is_whitespace() || c == ',')
         .map(|w| w.chars().filter(|c| c.is_alphanumeric() || *c == '-').collect::<String>().to_lowercase())
-        .filter(|w| !w.is_empty() && !matches!(w.as_str(), "jr" | "sr" | "ii" | "iii" | "iv" | "hon" | "the" | "honorable"))
+        .filter(|w| {
+            !w.is_empty() && !matches!(w.as_str(), "jr" | "sr" | "ii" | "iii" | "iv" | "hon" | "the" | "honorable")
+        })
         .collect()
 }
 
 impl Roster {
     pub fn new(house: Vec<RosterMember>, senate: Vec<RosterMember>) -> Self {
-        let by_district = house
-            .iter()
-            .enumerate()
-            .filter_map(|(i, m)| m.state_district.clone().map(|d| (d, i)))
-            .collect();
+        let by_district =
+            house.iter().enumerate().filter_map(|(i, m)| m.state_district.clone().map(|d| (d, i))).collect();
         Self { house, senate, by_district }
     }
 

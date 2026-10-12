@@ -15,7 +15,8 @@ pub enum Layout {
 }
 
 impl Layout {
-    pub const ALL: [Layout; 6] = [Layout::One, Layout::TwoCols, Layout::TwoRows, Layout::MainRight2, Layout::Grid2x2, Layout::Grid3x2];
+    pub const ALL: [Layout; 6] =
+        [Layout::One, Layout::TwoCols, Layout::TwoRows, Layout::MainRight2, Layout::Grid2x2, Layout::Grid3x2];
 
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s.trim().to_ascii_uppercase().as_str() {

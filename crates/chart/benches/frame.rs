@@ -19,8 +19,18 @@ fn bench(c: &mut Criterion) {
     let closes: Vec<f64> = bars.iter().map(|b| b.close).collect();
     let series = SeriesGpu::build(&bars);
     let overlays = [
-        Overlay { line: line_ref(&indicators::ema(&closes, 20)), color: [0.0, 0.6, 1.0, 1.0], kind: LineKind::Line, scale: 1.0 },
-        Overlay { line: line_ref(&indicators::sma(&closes, 50)), color: [1.0, 0.0, 1.0, 1.0], kind: LineKind::Line, scale: 1.0 },
+        Overlay {
+            line: line_ref(&indicators::ema(&closes, 20)),
+            color: [0.0, 0.6, 1.0, 1.0],
+            kind: LineKind::Line,
+            scale: 1.0,
+        },
+        Overlay {
+            line: line_ref(&indicators::sma(&closes, 50)),
+            color: [1.0, 0.0, 1.0, 1.0],
+            kind: LineKind::Line,
+            scale: 1.0,
+        },
     ];
     let mut g = c.benchmark_group("frame_1M_bars_1600x900");
     g.sample_size(50);

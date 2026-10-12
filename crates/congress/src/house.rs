@@ -331,7 +331,10 @@ mod tests {
 
     #[test]
     fn exchange_prefixed_ticker_and_cusip() {
-        assert_eq!(ticker_from_asset("DIA - SPDR Dow Jones Indust Avg ETF Trust NYSEARCA: DIA").as_deref(), Some("DIA"));
+        assert_eq!(
+            ticker_from_asset("DIA - SPDR Dow Jones Indust Avg ETF Trust NYSEARCA: DIA").as_deref(),
+            Some("DIA")
+        );
         assert_eq!(ticker_from_asset("US Treasury 01/31/28 (91282CGH8)"), None);
         assert_eq!(ticker_from_asset("Berkshire Hathaway Inc. New Common Stock (BRK.B)").as_deref(), Some("BRK.B"));
     }

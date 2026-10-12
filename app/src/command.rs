@@ -38,7 +38,9 @@ impl IndicatorSpec {
     pub fn same_kind(&self, other: &IndicatorSpec) -> bool {
         std::mem::discriminant(self) == std::mem::discriminant(other)
             && match (self, other) {
-                (IndicatorSpec::Sma(a), IndicatorSpec::Sma(b)) | (IndicatorSpec::Ema(a), IndicatorSpec::Ema(b)) => a == b,
+                (IndicatorSpec::Sma(a), IndicatorSpec::Sma(b)) | (IndicatorSpec::Ema(a), IndicatorSpec::Ema(b)) => {
+                    a == b
+                }
                 _ => true,
             }
     }
@@ -66,7 +68,8 @@ pub enum Range {
 }
 
 impl Range {
-    pub const ALL: [Range; 9] = [Range::D1, Range::D5, Range::M1, Range::M3, Range::M6, Range::Ytd, Range::Y1, Range::Y5, Range::All];
+    pub const ALL: [Range; 9] =
+        [Range::D1, Range::D5, Range::M1, Range::M3, Range::M6, Range::Ytd, Range::Y1, Range::Y5, Range::All];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -167,9 +170,10 @@ fn parse_function(head: &str, rest: &[&str]) -> Option<Function> {
         "SMA" => Function::Indicator(IndicatorSpec::Sma(num(rest.first()).unwrap_or(20))),
         "EMA" => Function::Indicator(IndicatorSpec::Ema(num(rest.first()).unwrap_or(20))),
         "VWAP" => Function::Indicator(IndicatorSpec::Vwap),
-        "BB" | "BOLL" | "BOLLINGER" => {
-            Function::Indicator(IndicatorSpec::Bollinger(num(rest.first()).unwrap_or(20), num(rest.get(1)).unwrap_or(2.0)))
-        }
+        "BB" | "BOLL" | "BOLLINGER" => Function::Indicator(IndicatorSpec::Bollinger(
+            num(rest.first()).unwrap_or(20),
+            num(rest.get(1)).unwrap_or(2.0),
+        )),
         "RSI" => Function::Indicator(IndicatorSpec::Rsi(num(rest.first()).unwrap_or(14))),
         "MACD" => Function::Indicator(IndicatorSpec::Macd(
             num(rest.first()).unwrap_or(12),
@@ -198,13 +202,21 @@ fn parse_function(head: &str, rest: &[&str]) -> Option<Function> {
             Some("DEL") | Some("RM") | Some("REMOVE") => Function::WatchRemove(words()[1..].to_vec()),
             _ => Function::Watchlist,
         },
-        "LAYOUT" | "GRID" => Function::Layout(rest.first().map(|s| s.to_ascii_uppercase()).unwrap_or_else(|| "1".into())),
+        "LAYOUT" | "GRID" => {
+            Function::Layout(rest.first().map(|s| s.to_ascii_uppercase()).unwrap_or_else(|| "1".into()))
+        }
         "NEW" => Function::NewPane,
         "CLOSE" => Function::ClosePane,
         "HELP" | "?" | "H" => Function::Help,
         "RANGE" => Function::Range(Range::parse(rest.first()?)?),
         // Timeframes win where spellings overlap (`1D`, `1M`); otherwise try a range (`5D`, `YTD`).
-        _ => return head.parse::<Timeframe>().ok().map(Function::Timeframe).or_else(|| Range::parse(&up).map(Function::Range)),
+        _ => {
+            return head
+                .parse::<Timeframe>()
+                .ok()
+                .map(Function::Timeframe)
+                .or_else(|| Range::parse(&up).map(Function::Range));
+        }
     })
 }
 
@@ -218,10 +230,7 @@ fn looks_like_ticker(s: &str) -> bool {
 
 /// Parse one command line. Returns `None` for empty or unrecognised input.
 pub fn parse(input: &str) -> Option<Command> {
-    let tokens: Vec<&str> = input
-        .split_whitespace()
-        .filter(|t| !t.eq_ignore_ascii_case("<GO>"))
-        .collect();
+    let tokens: Vec<&str> = input.split_whitespace().filter(|t| !t.eq_ignore_ascii_case("<GO>")).collect();
     let (&head, rest) = tokens.split_first()?;
     // A function keyword (or timeframe) wins over a ticker of the same spelling,
     // except for single letters that are common tickers when followed by nothing.
@@ -232,7 +241,8 @@ pub fn parse(input: &str) -> Option<Command> {
         return None;
     }
     let symbol = head.to_ascii_uppercase().replace('/', ".");
-    let rest: Vec<&str> = rest.iter().copied().filter(|t| !MARKET_SECTORS.contains(&t.to_ascii_uppercase().as_str())).collect();
+    let rest: Vec<&str> =
+        rest.iter().copied().filter(|t| !MARKET_SECTORS.contains(&t.to_ascii_uppercase().as_str())).collect();
     match rest.split_first() {
         None => Some(Command::Symbol(symbol)),
         Some((&f, args)) => parse_function(f, args).map(|func| Command::SymbolFunction(symbol, func)),
@@ -252,17 +262,20 @@ pub fn hint(input: &str) -> String {
 
 fn describe(f: &Function) -> String {
     match f {
-        Function::Timeframe(tf) => format!("Interval {}", match tf {
-            Timeframe::M1 => "1 minute",
-            Timeframe::M5 => "5 minutes",
-            Timeframe::M15 => "15 minutes",
-            Timeframe::M30 => "30 minutes",
-            Timeframe::H1 => "1 hour",
-            Timeframe::H4 => "4 hours",
-            Timeframe::D1 => "1 day",
-            Timeframe::W1 => "1 week",
-            Timeframe::MN1 => "1 month",
-        }),
+        Function::Timeframe(tf) => format!(
+            "Interval {}",
+            match tf {
+                Timeframe::M1 => "1 minute",
+                Timeframe::M5 => "5 minutes",
+                Timeframe::M15 => "15 minutes",
+                Timeframe::M30 => "30 minutes",
+                Timeframe::H1 => "1 hour",
+                Timeframe::H4 => "4 hours",
+                Timeframe::D1 => "1 day",
+                Timeframe::W1 => "1 week",
+                Timeframe::MN1 => "1 month",
+            }
+        ),
         Function::ChartType(c) => format!("Chart type {}", c.label()),
         Function::Indicator(i) => format!("Toggle {}", i.label()),
         Function::ClearIndicators => "Remove all indicators".into(),
@@ -325,14 +338,20 @@ mod tests {
         assert_eq!(parse("FIB"), Some(Command::Function(Function::Draw(Tool::Fib))));
         assert_eq!(parse("CLEAR DRAW"), Some(Command::Function(Function::ClearDrawings)));
         assert_eq!(parse("POL Nancy Pelosi"), Some(Command::Function(Function::Politician("Nancy Pelosi".into()))));
-        assert_eq!(parse("WL ADD msft nvda"), Some(Command::Function(Function::WatchAdd(vec!["MSFT".into(), "NVDA".into()]))));
+        assert_eq!(
+            parse("WL ADD msft nvda"),
+            Some(Command::Function(Function::WatchAdd(vec!["MSFT".into(), "NVDA".into()])))
+        );
         assert_eq!(parse("LAYOUT 4"), Some(Command::Function(Function::Layout("4".into()))));
     }
 
     #[test]
     fn symbol_with_function() {
         assert_eq!(parse("NVDA CONG <GO>"), Some(Command::SymbolFunction("NVDA".into(), Function::Congress)));
-        assert_eq!(parse("AAPL US EQUITY 1W"), Some(Command::SymbolFunction("AAPL".into(), Function::Timeframe(Timeframe::W1))));
+        assert_eq!(
+            parse("AAPL US EQUITY 1W"),
+            Some(Command::SymbolFunction("AAPL".into(), Function::Timeframe(Timeframe::W1)))
+        );
         assert_eq!(parse("AAPL WHATEVER"), None);
     }
 

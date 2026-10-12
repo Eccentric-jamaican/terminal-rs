@@ -70,11 +70,20 @@ fn plain(ui: &mut Ui, text: impl Into<String>, color: Color32) {
 
 /// Column header row; never wraps (narrow panes clip instead, like a terminal).
 fn header(ui: &mut Ui, text: &str) {
-    ui.add(egui::Label::new(RichText::new(text).font(mono(11.5)).color(AMBER).background_color(theme::HEADER)).extend());
+    ui.add(
+        egui::Label::new(RichText::new(text).font(mono(11.5)).color(AMBER).background_color(theme::HEADER)).extend(),
+    );
 }
 
 /// One trade row. `show_politician` / `show_ticker` drop redundant columns.
-fn trade_row(ui: &mut Ui, t: &Trade, show_politician: bool, show_ticker: bool, extra: Option<(String, Color32)>, out: &mut Vec<Action>) {
+fn trade_row(
+    ui: &mut Ui,
+    t: &Trade,
+    show_politician: bool,
+    show_ticker: bool,
+    extra: Option<(String, Color32)>,
+    out: &mut Vec<Action>,
+) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         plain(ui, t.filed_date.format("%m/%d/%y").to_string(), MUTED);
@@ -87,7 +96,11 @@ fn trade_row(ui: &mut Ui, t: &Trade, show_politician: bool, show_ticker: bool, e
             if r.clicked() {
                 out.push(Action::OpenProfile(t.politician.clone()));
             }
-            plain(ui, format!("{}-{:<2}", t.party.code(), t.state.as_deref().unwrap_or("")), theme::party_color(t.party));
+            plain(
+                ui,
+                format!("{}-{:<2}", t.party.code(), t.state.as_deref().unwrap_or("")),
+                theme::party_color(t.party),
+            );
             plain(ui, if t.chamber == Chamber::House { "H" } else { "S" }, MUTED);
         }
         let (tx, c) = tx_text(t.tx_type);
@@ -119,7 +132,9 @@ fn trade_row(ui: &mut Ui, t: &Trade, show_politician: bool, show_ticker: bool, e
 pub fn feed(ui: &mut Ui, trades: &[Trade], filter: &mut FeedFilter, status: &str) -> Vec<Action> {
     let mut out = Vec::new();
     ui.horizontal(|ui| {
-        let chip = |ui: &mut Ui, label: &str, on: bool| ui.selectable_label(on, RichText::new(label).font(mono(11.5))).clicked();
+        let chip = |ui: &mut Ui, label: &str, on: bool| {
+            ui.selectable_label(on, RichText::new(label).font(mono(11.5))).clicked()
+        };
         if chip(ui, "ALL", *filter == FeedFilter::default()) {
             *filter = FeedFilter::default();
         }
@@ -164,31 +179,54 @@ pub fn ticker_trades(ui: &mut Ui, symbol: &str, trades: &[Trade]) -> Vec<Action>
     let mut people: Vec<&str> = trades.iter().map(|t| t.politician.as_str()).collect();
     people.sort();
     people.dedup();
-    let buy_vol: f64 = trades.iter().filter(|t| t.tx_type.is_buy()).filter_map(|t| t.amount.map(|a| a.midpoint())).sum();
-    let sell_vol: f64 = trades.iter().filter(|t| t.tx_type.is_sell()).filter_map(|t| t.amount.map(|a| a.midpoint())).sum();
+    let buy_vol: f64 =
+        trades.iter().filter(|t| t.tx_type.is_buy()).filter_map(|t| t.amount.map(|a| a.midpoint())).sum();
+    let sell_vol: f64 =
+        trades.iter().filter(|t| t.tx_type.is_sell()).filter_map(|t| t.amount.map(|a| a.midpoint())).sum();
     ui.horizontal(|ui| {
         let r = clickable(ui, format!("{symbol} US Equity"), AMBER);
         if r.clicked() {
             out.push(Action::OpenChart(symbol.to_string()));
         }
-        plain(ui, format!("{} members · {buys} buys / {sells} sells · est. net ${:+.1}M", people.len(), (buy_vol - sell_vol) / 1e6), TEXT);
+        plain(
+            ui,
+            format!(
+                "{} members · {buys} buys / {sells} sells · est. net ${:+.1}M",
+                people.len(),
+                (buy_vol - sell_vol) / 1e6
+            ),
+            TEXT,
+        );
     });
     header(ui, "FILED    TRADED   LAG  POLITICIAN             PTY  C  TYPE AMOUNT        OWNER    ASSET");
     if trades.is_empty() {
         plain(ui, format!("No congressional trades disclosed for {symbol}."), MUTED);
     }
-    ScrollArea::both().id_salt(("ticker", symbol)).auto_shrink([false, false]).show_rows(ui, 16.0, trades.len(), |ui, range| {
-        for t in &trades[range] {
-            trade_row(ui, t, true, false, None, &mut out);
-        }
-    });
+    ScrollArea::both().id_salt(("ticker", symbol)).auto_shrink([false, false]).show_rows(
+        ui,
+        16.0,
+        trades.len(),
+        |ui, range| {
+            for t in &trades[range] {
+                trade_row(ui, t, true, false, None, &mut out);
+            }
+        },
+    );
     out
 }
 
 pub fn profile(ui: &mut Ui, query: &str, p: Option<&Profile>, loading: bool) -> Vec<Action> {
     let mut out = Vec::new();
     let Some(p) = p else {
-        plain(ui, if loading { format!("Loading profile for '{query}'…") } else { format!("No politician matches '{query}'. Try POL with a last name.") }, MUTED);
+        plain(
+            ui,
+            if loading {
+                format!("Loading profile for '{query}'…")
+            } else {
+                format!("No politician matches '{query}'. Try POL with a last name.")
+            },
+            MUTED,
+        );
         return out;
     };
     let pol = &p.politician;
@@ -211,7 +249,11 @@ pub fn profile(ui: &mut Ui, query: &str, p: Option<&Profile>, loading: bool) -> 
             TEXT,
         );
         let label = if p.tracked { "★ TRACKED" } else { "☆ TRACK" };
-        if ui.button(RichText::new(label).font(mono(12.0)).color(AMBER)).on_hover_text("Alert me when this politician files a new trade").clicked() {
+        if ui
+            .button(RichText::new(label).font(mono(12.0)).color(AMBER))
+            .on_hover_text("Alert me when this politician files a new trade")
+            .clicked()
+        {
             out.push(Action::Track(pol.id.to_string(), !p.tracked));
         }
     });
@@ -233,7 +275,7 @@ pub fn profile(ui: &mut Ui, query: &str, p: Option<&Profile>, loading: bool) -> 
         }
     }
     let mut top: Vec<(&str, usize)> = counts.into_iter().collect();
-    top.sort_by(|a, b| b.1.cmp(&a.1));
+    top.sort_by_key(|t| std::cmp::Reverse(t.1));
     ui.horizontal_wrapped(|ui| {
         plain(ui, "Most traded:", MUTED);
         for (tk, n) in top.into_iter().take(12) {
@@ -244,12 +286,20 @@ pub fn profile(ui: &mut Ui, query: &str, p: Option<&Profile>, loading: bool) -> 
     });
     header(ui, "FILED    TRADED   LAG  TYPE TICKER AMOUNT        RETURN  OWNER    ASSET");
     let ret_by_id: std::collections::HashMap<i64, f64> = p.returns.iter().map(|r| (r.trade_id, r.ret)).collect();
-    ScrollArea::both().id_salt(("profile", pol.id)).auto_shrink([false, false]).show_rows(ui, 16.0, p.trades.len(), |ui, range| {
-        for t in &p.trades[range] {
-            let extra = ret_by_id.get(&t.id).map(|r| (format!("{:>+6.1}%", r * 100.0), if *r >= 0.0 { theme::UP } else { theme::DOWN })).unwrap_or(("   n/a ".into(), MUTED));
-            trade_row(ui, t, false, true, Some(extra), &mut out);
-        }
-    });
+    ScrollArea::both().id_salt(("profile", pol.id)).auto_shrink([false, false]).show_rows(
+        ui,
+        16.0,
+        p.trades.len(),
+        |ui, range| {
+            for t in &p.trades[range] {
+                let extra = ret_by_id
+                    .get(&t.id)
+                    .map(|r| (format!("{:>+6.1}%", r * 100.0), if *r >= 0.0 { theme::UP } else { theme::DOWN }))
+                    .unwrap_or(("   n/a ".into(), MUTED));
+                trade_row(ui, t, false, true, Some(extra), &mut out);
+            }
+        },
+    );
     out
 }
 
@@ -262,26 +312,32 @@ pub fn politicians(ui: &mut Ui, list: &[PoliticianSummary], search: &mut String)
     });
     header(ui, "TRK POLITICIAN               PTY  ST  CH      TRADES  LAST FILED");
     let q = search.to_ascii_lowercase();
-    let rows: Vec<&PoliticianSummary> = list.iter().filter(|p| q.is_empty() || p.politician.name.to_ascii_lowercase().contains(&q)).collect();
-    ScrollArea::both().id_salt("politicians").auto_shrink([false, false]).show_rows(ui, 16.0, rows.len(), |ui, range| {
-        for s in &rows[range] {
-            let p = &s.politician;
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                if clickable(ui, if s.tracked { " ★ ".into() } else { " ☆ ".into() }, AMBER).clicked() {
-                    out.push(Action::Track(p.id.to_string(), !s.tracked));
-                }
-                if clickable(ui, truncate(&p.name, 24), theme::party_color(p.party)).clicked() {
-                    out.push(Action::OpenProfile(p.id.to_string()));
-                }
-                plain(ui, format!("{:<4}", p.party.code()), theme::party_color(p.party));
-                plain(ui, format!("{:<3}", p.state.as_deref().unwrap_or("")), TEXT);
-                plain(ui, format!("{:<7}", p.chamber.as_str()), MUTED);
-                plain(ui, format!("{:>6}", s.trades), TEXT);
-                plain(ui, s.last_filed.map(|d| d.to_string()).unwrap_or_default(), MUTED);
-            });
-        }
-    });
+    let rows: Vec<&PoliticianSummary> =
+        list.iter().filter(|p| q.is_empty() || p.politician.name.to_ascii_lowercase().contains(&q)).collect();
+    ScrollArea::both().id_salt("politicians").auto_shrink([false, false]).show_rows(
+        ui,
+        16.0,
+        rows.len(),
+        |ui, range| {
+            for s in &rows[range] {
+                let p = &s.politician;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if clickable(ui, if s.tracked { " ★ ".into() } else { " ☆ ".into() }, AMBER).clicked() {
+                        out.push(Action::Track(p.id.to_string(), !s.tracked));
+                    }
+                    if clickable(ui, truncate(&p.name, 24), theme::party_color(p.party)).clicked() {
+                        out.push(Action::OpenProfile(p.id.to_string()));
+                    }
+                    plain(ui, format!("{:<4}", p.party.code()), theme::party_color(p.party));
+                    plain(ui, format!("{:<3}", p.state.as_deref().unwrap_or("")), TEXT);
+                    plain(ui, format!("{:<7}", p.chamber.as_str()), MUTED);
+                    plain(ui, format!("{:>6}", s.trades), TEXT);
+                    plain(ui, s.last_filed.map(|d| d.to_string()).unwrap_or_default(), MUTED);
+                });
+            }
+        },
+    );
     out
 }
 
@@ -300,7 +356,9 @@ pub fn alerts(ui: &mut Ui, alerts: &[Alert]) -> (Vec<Action>, bool) {
     ScrollArea::vertical().id_salt("alerts").auto_shrink([false, false]).show(ui, |ui| {
         for a in alerts {
             ui.horizontal(|ui| {
-                let ts = chrono::DateTime::from_timestamp(a.created_at, 0).map(|d| d.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default();
+                let ts = chrono::DateTime::from_timestamp(a.created_at, 0)
+                    .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_default();
                 plain(ui, ts, if a.seen { MUTED } else { AMBER });
                 if clickable(ui, truncate(&a.politician, 24), TEXT).clicked() {
                     out.push(Action::OpenProfile(a.politician_id.to_string()));

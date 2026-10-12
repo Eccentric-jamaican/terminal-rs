@@ -203,7 +203,10 @@ mod tests {
         assert_eq!(p.levels(), 4); // 5, 3, 2, 1
         let l1 = p.level(1);
         assert_eq!(l1.len(), 3);
-        assert_eq!(l1[0], GpuBar { x: 0.0, w: 2.0, open: 0.0, high: 3.0, low: -1.0, close: 2.0, volume: 2.0, _pad: 0.0 });
+        assert_eq!(
+            l1[0],
+            GpuBar { x: 0.0, w: 2.0, open: 0.0, high: 3.0, low: -1.0, close: 2.0, volume: 2.0, _pad: 0.0 }
+        );
         assert_eq!(l1[2].x, 4.0);
         assert_eq!(l1[2].w, 1.0);
         let top = p.level(3);

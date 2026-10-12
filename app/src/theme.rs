@@ -66,7 +66,13 @@ pub fn apply(ctx: &egui::Context) {
     v.widgets.active.bg_fill = Color32::from_rgb(80, 60, 0);
     v.window_corner_radius = 0.into();
     v.menu_corner_radius = 0.into();
-    for w in [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
+    for w in [
+        &mut v.widgets.noninteractive,
+        &mut v.widgets.inactive,
+        &mut v.widgets.hovered,
+        &mut v.widgets.active,
+        &mut v.widgets.open,
+    ] {
         w.corner_radius = 0.into();
     }
     ctx.set_visuals(v);

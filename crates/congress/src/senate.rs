@@ -183,11 +183,8 @@ pub fn parse_ptr_html(html: &str) -> Result<SenatePtr> {
         let t = t.trim_start_matches("The Honorable").trim();
         t.split(" (").next().unwrap_or(t).trim().to_string()
     });
-    let filed_date = doc
-        .select(&sel("p.muted strong"))
-        .map(text_of)
-        .find(|t| t.contains("Filed"))
-        .and_then(|t| parse_us_date(&t));
+    let filed_date =
+        doc.select(&sel("p.muted strong")).map(text_of).find(|t| t.contains("Filed")).and_then(|t| parse_us_date(&t));
 
     let table = doc
         .select(&sel("table.table"))

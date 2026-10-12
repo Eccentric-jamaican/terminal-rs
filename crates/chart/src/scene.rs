@@ -126,7 +126,12 @@ fn transform(v: &Viewport, height_px: f64, scale: &PriceScale) -> PaneTransform 
 }
 
 /// Autoscale range for the visible part of the series and overlays.
-pub fn visible_extent(series: &SeriesGpu, overlays: &[Overlay], v: &Viewport, chart_type: ChartType) -> Option<(f64, f64, f64)> {
+pub fn visible_extent(
+    series: &SeriesGpu,
+    overlays: &[Overlay],
+    v: &Viewport,
+    chart_type: ChartType,
+) -> Option<(f64, f64, f64)> {
     let p = &series.bars.pyramid;
     let (lo, hi) = v.visible_range(p.len0);
     let k = level_for(v.bar_px, p.levels());
@@ -202,7 +207,12 @@ pub fn price_pane(p: &PricePane<'_>) -> PaneOutput {
             }
             let mut ls = style;
             ls.thickness_px = 2.0;
-            cmds.push(DrawCmd::Line { kind: LineKind::Line, data: p.series.closes.clone(), range, uniforms: Uniforms::new(&t, &ls) });
+            cmds.push(DrawCmd::Line {
+                kind: LineKind::Line,
+                data: p.series.closes.clone(),
+                range,
+                uniforms: Uniforms::new(&t, &ls),
+            });
         }
     }
     cmds.extend(overlay_cmds(p.overlays, v, &t, &style));
@@ -248,7 +258,13 @@ fn overlay_cmds(overlays: &[Overlay], v: &Viewport, t: &PaneTransform, base: &St
 }
 
 /// An indicator sub-pane (RSI, MACD): lines and histograms with their own scale.
-pub fn sub_pane(overlays: &[Overlay], v: &Viewport, height_px: f64, fixed: Option<(f64, f64)>, style: Style) -> PaneOutput {
+pub fn sub_pane(
+    overlays: &[Overlay],
+    v: &Viewport,
+    height_px: f64,
+    fixed: Option<(f64, f64)>,
+    style: Style,
+) -> PaneOutput {
     let len = overlays.first().map(|o| o.line.pyramid.level_len(0)).unwrap_or(0);
     let (lo, hi) = v.visible_range(len);
     let (l, h) = fixed.unwrap_or_else(|| {
@@ -263,7 +279,11 @@ pub fn sub_pane(overlays: &[Overlay], v: &Viewport, height_px: f64, fixed: Optio
         // Histograms grow from zero, so keep zero in range.
         if overlays.iter().any(|o| o.kind == LineKind::Hist) { (a.min(0.0), b.max(0.0)) } else { (a, b) }
     });
-    let scale = if fixed.is_some() { PriceScale::new(l, h, false, height_px) } else { PriceScale::padded(l, h, 0.1, false, height_px) };
+    let scale = if fixed.is_some() {
+        PriceScale::new(l, h, false, height_px)
+    } else {
+        PriceScale::padded(l, h, 0.1, false, height_px)
+    };
     let t = transform(v, height_px, &scale);
     let cmds = overlay_cmds(overlays, v, &t, &style);
     PaneOutput { cmds, scale, level: 0, vol_max: 0.0 }

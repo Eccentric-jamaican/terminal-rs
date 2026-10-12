@@ -14,7 +14,10 @@ use std::time::Instant;
 fn main() -> eframe::Result {
     let t0 = Instant::now();
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,wgpu_core=warn,wgpu_hal=warn,naga=warn".into()))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,wgpu_core=warn,wgpu_hal=warn,naga=warn".into()),
+        )
         .init();
 
     let options = eframe::NativeOptions {
@@ -30,10 +33,11 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             let rs = cc.wgpu_render_state.as_ref().ok_or("terminal-rs requires the wgpu renderer")?;
-            rs.renderer
-                .write()
-                .callback_resources
-                .insert(tr_chart::gpu::ChartRenderer::new(&rs.device, rs.target_format, 1));
+            rs.renderer.write().callback_resources.insert(tr_chart::gpu::ChartRenderer::new(
+                &rs.device,
+                rs.target_format,
+                1,
+            ));
             let provider = tr_data::from_env();
             let name = provider.name().to_string();
             let worker = worker::Worker::spawn(cc.egui_ctx.clone(), provider)?;

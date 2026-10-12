@@ -275,11 +275,18 @@ impl ChartRenderer {
             panes: HashMap::new(),
             frame_no: u64::MAX,
             next_slot: 0,
-            max_binding: device.limits().max_storage_buffer_binding_size as u64,
+            max_binding: device.limits().max_storage_buffer_binding_size,
         }
     }
 
-    fn ensure(&mut self, device: &wgpu::Device, is_line: bool, key: u64, version: u64, bytes: impl FnOnce() -> Vec<u8>) {
+    fn ensure(
+        &mut self,
+        device: &wgpu::Device,
+        is_line: bool,
+        key: u64,
+        version: u64,
+        bytes: impl FnOnce() -> Vec<u8>,
+    ) {
         let frame = self.frame_no;
         if let Some(b) = self.buffers.get_mut(&(is_line, key)) {
             b.last_used = frame;

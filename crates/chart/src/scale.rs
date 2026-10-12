@@ -117,10 +117,8 @@ pub fn time_ticks(times: &[i64], lo: usize, hi: usize, min_gap_bars: f64, tf: Ti
         return Vec::new();
     }
     let gap = min_gap_bars.max(1.0).ceil() as usize;
-    let mut cands: Vec<(Boundary, usize)> = (lo.max(1)..hi)
-        .map(|i| (boundary(times[i - 1], times[i]), i))
-        .filter(|(b, _)| *b > Boundary::None)
-        .collect();
+    let mut cands: Vec<(Boundary, usize)> =
+        (lo.max(1)..hi).map(|i| (boundary(times[i - 1], times[i]), i)).filter(|(b, _)| *b > Boundary::None).collect();
     // Higher boundaries first; within a level, keep chronological order.
     cands.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     let mut chosen: Vec<(usize, Boundary)> = Vec::new();

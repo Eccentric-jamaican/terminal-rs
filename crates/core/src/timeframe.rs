@@ -168,9 +168,8 @@ mod tests {
 
     #[test]
     fn resample_minutes_to_hour() {
-        let bars: Vec<Bar> = (0..120)
-            .map(|i| Bar::new(i * 60, i as f64, i as f64 + 1.0, i as f64 - 1.0, i as f64 + 0.5, 1.0))
-            .collect();
+        let bars: Vec<Bar> =
+            (0..120).map(|i| Bar::new(i * 60, i as f64, i as f64 + 1.0, i as f64 - 1.0, i as f64 + 0.5, 1.0)).collect();
         let h = Timeframe::H1.resample(&bars);
         assert_eq!(h.len(), 2);
         assert_eq!(h[0], Bar::new(0, 0.0, 60.0, -1.0, 59.5, 60.0));

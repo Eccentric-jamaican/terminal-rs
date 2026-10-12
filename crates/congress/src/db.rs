@@ -261,7 +261,10 @@ impl Db {
             for &d in dups {
                 tx.execute("UPDATE trades SET politician_id = ?1 WHERE politician_id = ?2", params![keep, d])?;
                 tx.execute("UPDATE filings SET politician_id = ?1 WHERE politician_id = ?2", params![keep, d])?;
-                tx.execute("UPDATE OR IGNORE tracked SET politician_id = ?1 WHERE politician_id = ?2", params![keep, d])?;
+                tx.execute(
+                    "UPDATE OR IGNORE tracked SET politician_id = ?1 WHERE politician_id = ?2",
+                    params![keep, d],
+                )?;
                 tx.execute("DELETE FROM tracked WHERE politician_id = ?1", [d])?;
                 tx.execute("UPDATE alerts SET politician_id = ?1 WHERE politician_id = ?2", params![keep, d])?;
                 tx.execute("DELETE FROM politicians WHERE id = ?1", [d])?;
@@ -587,7 +590,10 @@ mod tests {
             })
             .unwrap();
         db.conn().execute("UPDATE politicians SET bioguide = 'D000001' WHERE id = ?1", [dup]).unwrap();
-        assert_eq!(db.apply_roster(&[("D000001".into(), "Jane Doe".into(), Party::Republican, Some("MO".into()))]).unwrap(), 1);
+        assert_eq!(
+            db.apply_roster(&[("D000001".into(), "Jane Doe".into(), Party::Republican, Some("MO".into()))]).unwrap(),
+            1
+        );
         assert!(db.politician(dup).unwrap().is_none());
         let s = db.search_politicians("doe", 10).unwrap();
         assert_eq!(s[0].trades, 2);

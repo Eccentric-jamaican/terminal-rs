@@ -25,8 +25,15 @@ async fn main() -> anyhow::Result<()> {
     for t in db.latest_trades(15)? {
         println!(
             "{} {:<24} {} {:<6} {:<5} {:<12} tx {} filed {} lag {}d",
-            t.chamber.as_str(), t.politician, t.party.code(), t.ticker.as_deref().unwrap_or("-"),
-            t.tx_type.marker(), t.amount.map(|a| a.to_string()).unwrap_or_default(), t.tx_date, t.filed_date, t.disclosure_lag_days()
+            t.chamber.as_str(),
+            t.politician,
+            t.party.code(),
+            t.ticker.as_deref().unwrap_or("-"),
+            t.tx_type.marker(),
+            t.amount.map(|a| a.to_string()).unwrap_or_default(),
+            t.tx_date,
+            t.filed_date,
+            t.disclosure_lag_days()
         );
     }
     Ok(())
