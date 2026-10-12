@@ -56,11 +56,7 @@ pub fn rsi(closes: &[f64], n: usize) -> Vec<f64> {
         return out;
     }
     let value = |g: f64, l: f64| {
-        if l == 0.0 {
-            if g == 0.0 { 50.0 } else { 100.0 }
-        } else {
-            100.0 - 100.0 / (1.0 + g / l)
-        }
+        if l == 0.0 { if g == 0.0 { 50.0 } else { 100.0 } } else { 100.0 - 100.0 / (1.0 + g / l) }
     };
     let (mut ag, mut al) = (0.0, 0.0);
     for i in 1..=n {

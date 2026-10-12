@@ -8,9 +8,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use serde::Deserialize;
-use tr_core::{Bar, Timeframe};
+use tr_core::{AssetClass, Bar, Security, Timeframe, catalog};
 
-use crate::{MarketData, Quote};
+use crate::{MarketData, Quote, SearchHit};
 
 const BASE: &str = "https://query1.finance.yahoo.com/v8/finance/chart";
 
@@ -174,24 +174,123 @@ impl MarketData for YahooProvider {
         Ok(crate::clip(bars, end, limit))
     }
 
+    /// Batched via the spark endpoint (20 symbols per request).
     async fn quotes(&self, symbols: &[String]) -> Result<Vec<Quote>> {
-        let now = chrono::Utc::now().timestamp();
         let mut out = Vec::with_capacity(symbols.len());
-        for s in symbols {
-            let c = self.chart(s, "1d", now - 10 * 86_400, now + 60).await?;
-            let Some(last) = c.bars.last() else { continue };
-            let prev = c
-                .prev_close
-                .unwrap_or_else(|| if c.bars.len() > 1 { c.bars[c.bars.len() - 2].close } else { last.open });
-            out.push(Quote {
-                symbol: s.clone(),
-                last: c.last_price.unwrap_or(last.close),
-                prev_close: prev,
-                ts: last.ts,
-            });
+        for chunk in symbols.chunks(20) {
+            out.extend(self.spark(chunk).await?);
         }
         Ok(out)
     }
+
+    async fn search(&self, query: &str) -> Result<Vec<SearchHit>> {
+        let resp = self
+            .client
+            .get(SEARCH)
+            .query(&[("q", query), ("quotesCount", "12"), ("newsCount", "0"), ("listsCount", "0")])
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            bail!("yahoo search: HTTP {}", resp.status());
+        }
+        parse_search(&resp.text().await?)
+    }
+}
+
+const SPARK: &str = "https://query1.finance.yahoo.com/v8/finance/spark";
+const SEARCH: &str = "https://query2.finance.yahoo.com/v1/finance/search";
+
+impl YahooProvider {
+    /// Last price, previous close and the last few daily closes for each Yahoo symbol.
+    pub async fn spark(&self, symbols: &[String]) -> Result<Vec<Quote>> {
+        let resp = self
+            .client
+            .get(SPARK)
+            .query(&[("symbols", symbols.join(",")), ("range", "10d".into()), ("interval", "1d".into())])
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            bail!("yahoo spark: HTTP {}", resp.status());
+        }
+        parse_spark(&resp.text().await?)
+    }
+}
+
+/// Parse `/v8/finance/spark`: `{SYMBOL: {timestamp: [...], close: [...], chartPreviousClose}}`.
+pub fn parse_spark(json: &str) -> Result<Vec<Quote>> {
+    let v: serde_json::Value = serde_json::from_str(json).context("parsing Yahoo spark")?;
+    let obj = v.as_object().ok_or_else(|| anyhow!("unexpected spark payload"))?;
+    let mut out = Vec::new();
+    for (sym, d) in obj {
+        let closes: Vec<f64> =
+            d["close"].as_array().map(|a| a.iter().filter_map(|x| x.as_f64()).collect()).unwrap_or_default();
+        let Some(&last) = closes.last() else { continue };
+        let prev =
+            if closes.len() >= 2 { closes[closes.len() - 2] } else { d["chartPreviousClose"].as_f64().unwrap_or(last) };
+        let ts = d["timestamp"].as_array().and_then(|a| a.last()).and_then(|t| t.as_i64()).unwrap_or_default();
+        out.push(Quote { symbol: sym.clone(), last, prev_close: prev, ts, spark: closes });
+    }
+    Ok(out)
+}
+
+/// Map a Yahoo symbol and quote type to a market key.
+pub fn security_for_yahoo(symbol: &str, quote_type: &str) -> Option<Security> {
+    if let Some(l) = catalog::CATALOG.iter().find(|l| l.yahoo == Some(symbol)) {
+        return Some(l.security());
+    }
+    let class_share = |s: &str| match s.split_once('-') {
+        Some((a, b)) if b.len() == 1 && a.chars().all(|c| c.is_ascii_uppercase()) => format!("{a}.{b}"),
+        _ => s.to_string(),
+    };
+    Some(match quote_type {
+        "EQUITY" => Security::new(class_share(symbol), AssetClass::Equity),
+        "ETF" => Security::new(class_share(symbol), AssetClass::Etf),
+        "INDEX" => Security::new(symbol, AssetClass::Index),
+        "CURRENCY" => Security::new(symbol.trim_end_matches("=X"), AssetClass::Fx),
+        "CRYPTOCURRENCY" => Security::new(symbol.replace('-', ""), AssetClass::Crypto),
+        "FUTURE" => Security::new(symbol, AssetClass::Cmdty),
+        _ => return None,
+    })
+}
+
+/// Yahoo symbol for any security (catalog first, then class conventions).
+pub fn yahoo_symbol(sec: &Security) -> String {
+    if let Some(y) = catalog::by_security(sec).and_then(|l| l.yahoo) {
+        return y.to_string();
+    }
+    match sec.class {
+        AssetClass::Equity | AssetClass::Etf => sec.ticker.replace('.', "-"),
+        AssetClass::Index if sec.ticker.starts_with('^') => sec.ticker.clone(),
+        AssetClass::Index => format!("^{}", sec.ticker),
+        AssetClass::Fx => format!("{}=X", sec.ticker),
+        AssetClass::Crypto => match sec.pair() {
+            Some((b, q)) => format!("{b}-{}", if q == "USDT" { "USD" } else { q }),
+            None => sec.ticker.clone(),
+        },
+        AssetClass::Govt | AssetClass::Cmdty => sec.ticker.clone(),
+    }
+}
+
+/// Parse `/v1/finance/search` into market-key hits.
+pub fn parse_search(json: &str) -> Result<Vec<SearchHit>> {
+    let v: serde_json::Value = serde_json::from_str(json).context("parsing Yahoo search")?;
+    Ok(v["quotes"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|q| {
+                    let sec = security_for_yahoo(q["symbol"].as_str()?, q["quoteType"].as_str()?)?;
+                    let name = q["shortname"].as_str().or(q["longname"].as_str()).unwrap_or("").trim().to_string();
+                    Some(SearchHit {
+                        key: sec.key(),
+                        name,
+                        class: sec.class,
+                        exchange: q["exchDisp"].as_str().or(q["exchange"].as_str()).map(str::to_string),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -214,6 +313,34 @@ mod tests {
         assert_eq!(parse_chart(json).unwrap().bars.len(), 1);
         let err = r#"{"chart":{"result":null,"error":{"code":"Not Found","description":"No data found"}}}"#;
         assert!(parse_chart(err).is_err());
+    }
+
+    #[test]
+    fn spark_and_search_fixtures() {
+        let q = parse_spark(include_str!("../tests/fixtures/yahoo_spark.json")).unwrap();
+        assert_eq!(q.len(), 4);
+        let spx = q.iter().find(|x| x.symbol == "^GSPC").unwrap();
+        assert_eq!(spx.last, 7811.54);
+        assert_eq!(spx.prev_close, 7765.36);
+        assert_eq!(spx.spark.len(), 5);
+        let hits = parse_search(include_str!("../tests/fixtures/yahoo_search.json")).unwrap();
+        assert_eq!(hits[0].key, "NVDA US Equity");
+        assert!(hits.iter().any(|h| h.class == AssetClass::Etf));
+        assert!(hits.iter().any(|h| h.class == AssetClass::Cmdty));
+    }
+
+    #[test]
+    fn symbol_mapping() {
+        let s = |t: &str, c| yahoo_symbol(&Security::new(t, c));
+        assert_eq!(s("SPX", AssetClass::Index), "^GSPC");
+        assert_eq!(s("CL1", AssetClass::Cmdty), "CL=F");
+        assert_eq!(s("AUDNZD", AssetClass::Fx), "AUDNZD=X");
+        assert_eq!(s("BRK.B", AssetClass::Equity), "BRK-B");
+        assert_eq!(s("ZZZ", AssetClass::Equity), "ZZZ");
+        assert_eq!(security_for_yahoo("EURUSD=X", "CURRENCY").unwrap().key(), "EURUSD Curncy");
+        assert_eq!(security_for_yahoo("GC=F", "FUTURE").unwrap().key(), "GC1 Comdty");
+        assert_eq!(security_for_yahoo("DOGE-USD", "CRYPTOCURRENCY").unwrap().key(), "DOGEUSD Curncy");
+        assert_eq!(security_for_yahoo("BF-B", "EQUITY").unwrap().ticker, "BF.B");
     }
 
     #[test]
