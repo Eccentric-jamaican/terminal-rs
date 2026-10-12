@@ -109,6 +109,19 @@ pub async fn refresh<S: Source>(src: &S, db: &Mutex<Db>, cfg: &RefreshConfig) ->
         }
     };
 
+    if !roster.is_empty() {
+        let members: Vec<_> = roster
+            .house
+            .iter()
+            .chain(&roster.senate)
+            .filter_map(|m| m.bioguide.clone().map(|b| (b, m.name.clone(), m.party, Some(m.state.clone()))))
+            .collect();
+        match db.lock().await.apply_roster(&members) {
+            Ok(n) if n > 0 => info!("merged {n} duplicate politician rows via roster"),
+            Ok(_) => {}
+            Err(e) => warn!("roster sync failed: {e:#}"),
+        }
+    }
     if let Err(e) = refresh_house(src, db, cfg, &roster, &mut report).await {
         warn!("house refresh failed: {e:#}");
         report.errors.push(format!("house: {e:#}"));
@@ -154,7 +167,10 @@ async fn store(
             let mut t: Vec<String> = parsed
                 .trades
                 .iter()
-                .map(|t| format!("{} {}", t.tx_type.marker(), t.ticker.as_deref().unwrap_or("asset")))
+                .map(|t| {
+                    let what = t.ticker.clone().unwrap_or_else(|| t.asset_name.chars().take(18).collect());
+                    format!("{} {what}", t.tx_type.marker())
+                })
                 .collect();
             t.dedup();
             t.truncate(6);

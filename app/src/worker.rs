@@ -189,7 +189,7 @@ fn session_key(tf: Timeframe) -> impl Fn(i64) -> i64 {
 }
 
 fn overlay(values: &[f64], color: egui::Color32, kind: LineKind) -> Overlay {
-    Overlay { line: line_ref(values), color: theme::rgba(color), kind }
+    Overlay { line: line_ref(values), color: theme::rgba(color), kind, scale: 1.0 }
 }
 
 pub fn build_indicators(bars: &[Bar], tf: Timeframe, specs: &[IndicatorSpec]) -> Vec<BuiltIndicator> {
@@ -227,19 +227,18 @@ pub fn build_indicators(bars: &[Bar], tf: Timeframe, specs: &[IndicatorSpec]) ->
         .collect()
 }
 
-/// Align `other` to `base` timestamps and rescale so both start at the same price at the
-/// first common bar, which is how a compare overlay is read (relative performance).
+/// Align `other`'s closes to `base` timestamps (last close at or before each bar). The
+/// chart rebases the result to the first visible bar every frame.
 pub fn align_compare(base: &[Bar], other: &[Bar]) -> Vec<f64> {
     let mut out = vec![f64::NAN; base.len()];
     let mut j = 0;
-    let mut scale = None;
     for (i, b) in base.iter().enumerate() {
         while j + 1 < other.len() && other[j + 1].ts <= b.ts {
             j += 1;
         }
-        let Some(o) = other.get(j).filter(|o| o.ts <= b.ts) else { continue };
-        let s = *scale.get_or_insert(b.close / o.close);
-        out[i] = o.close * s;
+        if let Some(o) = other.get(j).filter(|o| o.ts <= b.ts) {
+            out[i] = o.close;
+        }
     }
     out
 }
@@ -439,14 +438,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn compare_alignment_rescales_to_base() {
+    fn compare_alignment_carries_last_close() {
         let base: Vec<Bar> = (0..5).map(|i| Bar::new(i * 10, 100.0, 100.0, 100.0, 100.0 + i as f64, 1.0)).collect();
         let other: Vec<Bar> = vec![Bar::new(5, 0.0, 0.0, 0.0, 50.0, 1.0), Bar::new(25, 0.0, 0.0, 0.0, 55.0, 1.0)];
         let a = align_compare(&base, &other);
         assert!(a[0].is_nan());
-        assert_eq!(a[1], 101.0); // first common bar: scaled to base close
-        assert_eq!(a[2], 101.0);
-        assert!((a[3] - 55.0 * 101.0 / 50.0).abs() < 1e-9);
+        assert_eq!(&a[1..], &[50.0, 50.0, 55.0, 55.0]);
     }
 
     #[test]

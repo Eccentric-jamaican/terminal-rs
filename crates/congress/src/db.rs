@@ -246,6 +246,38 @@ impl Db {
         )?)
     }
 
+    /// Apply canonical roster identity to stored politicians: fix names/party for known
+    /// bioguide IDs and merge rows that share a bioguide ID (from earlier name typos).
+    /// Returns the number of rows merged away.
+    pub fn apply_roster(&mut self, members: &[(String, String, Party, Option<String>)]) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let mut merged = 0;
+        for (bio, name, party, state) in members {
+            let ids: Vec<i64> = {
+                let mut st = tx.prepare_cached("SELECT id FROM politicians WHERE bioguide = ?1 ORDER BY id")?;
+                st.query_map([bio], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
+            };
+            let Some((&keep, dups)) = ids.split_first() else { continue };
+            for &d in dups {
+                tx.execute("UPDATE trades SET politician_id = ?1 WHERE politician_id = ?2", params![keep, d])?;
+                tx.execute("UPDATE filings SET politician_id = ?1 WHERE politician_id = ?2", params![keep, d])?;
+                tx.execute("UPDATE OR IGNORE tracked SET politician_id = ?1 WHERE politician_id = ?2", params![keep, d])?;
+                tx.execute("DELETE FROM tracked WHERE politician_id = ?1", [d])?;
+                tx.execute("UPDATE alerts SET politician_id = ?1 WHERE politician_id = ?2", params![keep, d])?;
+                tx.execute("DELETE FROM politicians WHERE id = ?1", [d])?;
+                merged += 1;
+            }
+            tx.execute(
+                "UPDATE OR IGNORE politicians SET name = ?2,
+                   party = CASE WHEN ?3 <> '?' THEN ?3 ELSE party END, state = COALESCE(?4, state)
+                 WHERE id = ?1",
+                params![keep, name, party.code(), state],
+            )?;
+        }
+        tx.commit()?;
+        Ok(merged)
+    }
+
     pub fn known_filing_ids(&self, chamber: Chamber) -> Result<HashSet<String>> {
         let mut st = self.conn.prepare_cached("SELECT id FROM filings WHERE chamber = ?1 AND status <> 'error'")?;
         let ids = st.query_map([chamber.as_str()], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
@@ -543,6 +575,20 @@ mod tests {
         assert_eq!(db.alerts(true, 10).unwrap().len(), 1);
         db.mark_alerts_seen().unwrap();
         assert!(db.alerts(true, 10).unwrap().is_empty());
+        // Roster sync merges a stray duplicate created before bioguide was known.
+        let dup = db
+            .upsert_politician(&NewPolitician {
+                name: "Doe Jane (typo)".into(),
+                chamber: Chamber::House,
+                party: Party::Unknown,
+                state: None,
+                district: None,
+                bioguide: None,
+            })
+            .unwrap();
+        db.conn().execute("UPDATE politicians SET bioguide = 'D000001' WHERE id = ?1", [dup]).unwrap();
+        assert_eq!(db.apply_roster(&[("D000001".into(), "Jane Doe".into(), Party::Republican, Some("MO".into()))]).unwrap(), 1);
+        assert!(db.politician(dup).unwrap().is_none());
         let s = db.search_politicians("doe", 10).unwrap();
         assert_eq!(s[0].trades, 2);
         assert!(s[0].tracked);

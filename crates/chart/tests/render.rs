@@ -26,7 +26,7 @@ fn renders_candles_volume_lines_and_hist() {
     let bars = sample::generate("AAPL", Timeframe::D1, 2_000, 1_790_000_000);
     let series = SeriesGpu::build(&bars);
     let closes: Vec<f64> = bars.iter().map(|b| b.close).collect();
-    let overlays = [Overlay { line: line_ref(&indicators::sma(&closes, 20)), color: [0.0, 0.6, 1.0, 1.0], kind: LineKind::Line }];
+    let overlays = [Overlay { line: line_ref(&indicators::sma(&closes, 20)), color: [0.0, 0.6, 1.0, 1.0], kind: LineKind::Line, scale: 1.0 }];
     let v = Viewport::fit_last(bars.len(), 150, 800.0);
     for ct in ChartType::ALL {
         let out = price_pane(&PricePane {
@@ -61,7 +61,7 @@ fn renders_candles_volume_lines_and_hist() {
 
     // MACD histogram in a sub-pane.
     let m = indicators::macd(&closes, 12, 26, 9);
-    let hist = [Overlay { line: line_ref(&m.histogram), color: [1.0; 4], kind: LineKind::Hist }];
+    let hist = [Overlay { line: line_ref(&m.histogram), color: [1.0; 4], kind: LineKind::Hist, scale: 1.0 }];
     let out = sub_pane(&hist, &v, 400.0, None, Style::default());
     h.render(&mut [Frame { pane: 2, frame_no: 0, cmds: out.cmds }]);
     let px = h.read_pixels();

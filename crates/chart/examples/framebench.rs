@@ -28,8 +28,8 @@ fn main() {
     let closes: Vec<f64> = bars.iter().map(|b| b.close).collect();
     let series = SeriesGpu::build(&bars);
     let overlays = [
-        Overlay { line: line_ref(&indicators::ema(&closes, 20)), color: [0.0, 0.6, 1.0, 1.0], kind: LineKind::Line },
-        Overlay { line: line_ref(&indicators::bollinger(&closes, 20, 2.0).upper), color: [0.8, 0.8, 0.8, 1.0], kind: LineKind::Line },
+        Overlay { line: line_ref(&indicators::ema(&closes, 20)), color: [0.0, 0.6, 1.0, 1.0], kind: LineKind::Line, scale: 1.0 },
+        Overlay { line: line_ref(&indicators::bollinger(&closes, 20, 2.0).upper), color: [0.8, 0.8, 0.8, 1.0], kind: LineKind::Line, scale: 1.0 },
     ];
     let prep_ms = t.elapsed().as_secs_f64() * 1e3;
     println!("{n} bars: generate {gen_ms:.0} ms, pyramids+indicators {prep_ms:.0} ms");

@@ -12,6 +12,19 @@ use crate::viewport::{PriceScale, Viewport};
 
 static NEXT_KEY: AtomicU64 = AtomicU64::new(1);
 
+/// Factor that makes `line` equal `base` at the first index in `[lo, hi)` where both
+/// are defined, so a compare series reads as performance relative to the left edge.
+pub fn rebase_factor(base: &LineRef, line: &LineRef, lo: usize, hi: usize) -> f64 {
+    let (b, l) = (&base.pyramid.data, &line.pyramid.data);
+    let n = base.pyramid.level_len(0).min(line.pyramid.level_len(0));
+    (lo..hi.min(n))
+        .find_map(|i| {
+            let (x, y) = (b[i][1] as f64, l[i][1] as f64);
+            (x.is_finite() && y.is_finite() && y != 0.0).then(|| x / y)
+        })
+        .unwrap_or(1.0)
+}
+
 /// Process-unique key for GPU buffer caching.
 pub fn next_key() -> u64 {
     NEXT_KEY.fetch_add(1, Ordering::Relaxed)
@@ -74,6 +87,8 @@ pub struct Overlay {
     pub line: LineRef,
     pub color: [f32; 4],
     pub kind: LineKind,
+    /// Values are drawn multiplied by this factor (compare series rebased per frame).
+    pub scale: f64,
 }
 
 /// Everything needed to draw the main price pane.
@@ -125,8 +140,8 @@ pub fn visible_extent(series: &SeriesGpu, overlays: &[Overlay], v: &Viewport, ch
     for o in overlays.iter().filter(|o| o.kind == LineKind::Line) {
         let kk = level_for(v.bar_px, o.line.pyramid.levels());
         if let Some((a, b)) = o.line.pyramid.extent(kk, lo, hi) {
-            l = l.min(a);
-            h = h.max(b);
+            l = l.min(a * o.scale);
+            h = h.max(b * o.scale);
         }
     }
     Some((l, h, vmax))
@@ -204,6 +219,18 @@ fn overlay_cmds(overlays: &[Overlay], v: &Viewport, t: &PaneTransform, base: &St
             let k = level_for(v.bar_px, lp.levels());
             let mut s = *base;
             s.color = o.color;
+            // Drawing v*scale against [lo, hi] equals drawing v against [lo/scale, hi/scale].
+            let mut t = *t;
+            if o.scale != 1.0 && o.scale > 0.0 {
+                let shift = if t.log { o.scale.ln() } else { 0.0 };
+                if t.log {
+                    t.y_lo -= shift;
+                    t.y_hi -= shift;
+                } else {
+                    t.y_lo /= o.scale;
+                    t.y_hi /= o.scale;
+                }
+            }
             let range = match o.kind {
                 LineKind::Hist => {
                     s.hist_width_bars = (base.body_frac as f64 * (1u64 << k) as f64) as f32;
@@ -215,7 +242,7 @@ fn overlay_cmds(overlays: &[Overlay], v: &Viewport, t: &PaneTransform, base: &St
                 }
                 _ => lp.segment_range(k, lo, hi),
             };
-            DrawCmd::Line { kind: o.kind, data: o.line.clone(), range, uniforms: Uniforms::new(t, &s) }
+            DrawCmd::Line { kind: o.kind, data: o.line.clone(), range, uniforms: Uniforms::new(&t, &s) }
         })
         .collect()
 }
@@ -277,9 +304,17 @@ mod tests {
     }
 
     #[test]
+    fn rebase_uses_first_visible_common_value() {
+        let base = line_ref(&[f64::NAN, 10.0, 20.0, 30.0]);
+        let other = line_ref(&[1.0, f64::NAN, 4.0, 5.0]);
+        assert_eq!(rebase_factor(&base, &other, 0, 4), 5.0);
+        assert_eq!(rebase_factor(&base, &other, 3, 4), 6.0);
+    }
+
+    #[test]
     fn sub_pane_fixed_and_auto() {
         let vals: Vec<f64> = (0..100).map(|i| (i as f64 * 0.2).sin()).collect();
-        let o = Overlay { line: line_ref(&vals), color: [1.0; 4], kind: LineKind::Hist };
+        let o = Overlay { line: line_ref(&vals), color: [1.0; 4], kind: LineKind::Hist, scale: 1.0 };
         let v = Viewport::fit_last(100, 100, 500.0);
         let out = sub_pane(std::slice::from_ref(&o), &v, 100.0, None, Style::default());
         assert!(out.scale.lo < -0.9 && out.scale.hi > 0.9);

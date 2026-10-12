@@ -53,6 +53,7 @@ pub struct ChartState {
     error: Option<String>,
     built: Vec<BuiltIndicator>,
     compare_line: Option<LineRef>,
+    compare_scale: f64,
     markers: Vec<Trade>,
     pending_range: Option<Range>,
     draw: DrawState,
@@ -84,6 +85,7 @@ impl ChartState {
             error: None,
             built: Vec::new(),
             compare_line: None,
+            compare_scale: 1.0,
             markers: Vec::new(),
             pending_range: None,
             draw: DrawState::default(),
@@ -474,7 +476,10 @@ impl ChartState {
         // ---- price pane GPU frame ----
         let mut overlays: Vec<Overlay> = self.built.iter().filter(|b| !b.spec.is_pane()).flat_map(|b| b.overlays.iter().map(|o| o.1.clone())).collect();
         if let Some(c) = &self.compare_line {
-            overlays.push(Overlay { line: c.clone(), color: theme::rgba(theme::SERIES[5]), kind: LineKind::Line });
+            let (lo, hi) = self.viewport.as_ref().map(|v| v.visible_range(len)).unwrap_or((0, len));
+            let scale = scene::rebase_factor(&gpu.closes, c, lo, hi);
+            self.compare_scale = scale;
+            overlays.push(Overlay { line: c.clone(), color: theme::rgba(theme::SERIES[5]), kind: LineKind::Line, scale });
         }
         let style = Style {
             up: theme::rgba(theme::UP),
@@ -669,8 +674,14 @@ impl ChartState {
             ly += 14.0;
         }
         if let (Some(sym), Some(line)) = (&self.compare, &self.compare_line) {
-            let v = value_at(line).map(|v| format!("{v:.2}")).unwrap_or_default();
-            p.text(pos2(price_rect.left() + 6.0, ly), Align2::LEFT_TOP, format!("CMP {sym}  {v} (rebased)"), mono(11.0), theme::SERIES[5]);
+            // Raw price plus performance relative to the left edge of the view.
+            let raw = value_at(line);
+            let rel = raw.zip(self.bars.get(i)).map(|(r, b)| (r * self.compare_scale / b.close - 1.0) * 100.0);
+            let text = match (raw, rel) {
+                (Some(r), Some(rel)) => format!("CMP {sym}  {r:.2}  ({rel:+.2}% vs {})", self.symbol),
+                _ => format!("CMP {sym}"),
+            };
+            p.text(pos2(price_rect.left() + 6.0, ly), Align2::LEFT_TOP, text, mono(11.0), theme::SERIES[5]);
             ly += 14.0;
         }
         if let Some(tool) = self.draw.tool {

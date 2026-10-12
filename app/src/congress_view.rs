@@ -57,7 +57,7 @@ fn truncate(s: &str, n: usize) -> String {
 }
 
 fn clickable(ui: &mut Ui, text: String, color: Color32) -> egui::Response {
-    let r = ui.add(egui::Label::new(RichText::new(text).font(mono(12.0)).color(color)).sense(Sense::click()));
+    let r = ui.add(egui::Label::new(RichText::new(text).font(mono(12.0)).color(color)).extend().sense(Sense::click()));
     if r.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -65,11 +65,12 @@ fn clickable(ui: &mut Ui, text: String, color: Color32) -> egui::Response {
 }
 
 fn plain(ui: &mut Ui, text: impl Into<String>, color: Color32) {
-    ui.label(RichText::new(text.into()).font(mono(12.0)).color(color));
+    ui.add(egui::Label::new(RichText::new(text.into()).font(mono(12.0)).color(color)).extend());
 }
 
+/// Column header row; never wraps (narrow panes clip instead, like a terminal).
 fn header(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text).font(mono(11.5)).color(AMBER).background_color(theme::HEADER));
+    ui.add(egui::Label::new(RichText::new(text).font(mono(11.5)).color(AMBER).background_color(theme::HEADER)).extend());
 }
 
 /// One trade row. `show_politician` / `show_ticker` drop redundant columns.

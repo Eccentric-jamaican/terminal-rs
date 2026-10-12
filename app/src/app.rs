@@ -92,6 +92,7 @@ pub struct TerminalApp {
     panes: Vec<Pane>,
     focus: usize,
     next_id: PaneId,
+    last_opened: Option<usize>,
 
     cmd: String,
     cmd_history: Vec<String>,
@@ -131,6 +132,7 @@ impl TerminalApp {
             panes: Vec::new(),
             focus: 0,
             next_id: 1,
+            last_opened: None,
             cmd: String::new(),
             cmd_history: Vec::new(),
             cmd_hist_pos: None,
@@ -268,39 +270,47 @@ impl TerminalApp {
 
     fn fit_panes_to_layout(&mut self) {
         let n = self.layout.slots();
-        let defaults = [PaneKind::Feed, PaneKind::Watchlist, PaneKind::Politicians, PaneKind::Alerts, PaneKind::Help];
-        let mut di = 0;
         while self.panes.len() < n {
-            let kind = match defaults.get(di) {
-                Some(PaneKind::Feed) => PaneKind::Feed,
-                Some(PaneKind::Watchlist) => PaneKind::Watchlist,
-                Some(PaneKind::Politicians) => PaneKind::Politicians,
-                Some(PaneKind::Alerts) => PaneKind::Alerts,
-                _ => PaneKind::Chart(Box::new(ChartState::new(0, "SPY", Timeframe::D1))),
+            let has = |f: fn(&PaneKind) -> bool| self.panes.iter().any(|p| f(&p.kind));
+            let kind = if !has(|k| matches!(k, PaneKind::Feed)) {
+                PaneKind::Feed
+            } else if !has(|k| matches!(k, PaneKind::Watchlist)) {
+                PaneKind::Watchlist
+            } else if !has(|k| matches!(k, PaneKind::Politicians)) {
+                PaneKind::Politicians
+            } else if !has(|k| matches!(k, PaneKind::Alerts)) {
+                PaneKind::Alerts
+            } else {
+                let sym = ["SPY", "QQQ", "NVDA", "MSFT"][self.panes.len() % 4];
+                PaneKind::Chart(Box::new(ChartState::new(0, sym, Timeframe::D1)))
             };
-            di += 1;
             self.push_pane(kind);
         }
         self.panes.truncate(n);
         self.focus = self.focus.min(n - 1);
+        self.last_opened = self.last_opened.filter(|&i| i < n);
     }
 
-    /// Where to show a non-chart panel: an existing pane of the same type, else the first
-    /// pane that isn't the focused chart, else the focused pane.
+    /// Where to show a non-chart panel: an existing pane of the same type, else a pane
+    /// whose kind is shown twice, else a non-chart pane that wasn't just opened, else the
+    /// pane after the focused chart.
     fn target_pane(&self, same: impl Fn(&PaneKind) -> bool) -> usize {
         if let Some(i) = self.panes.iter().position(|p| same(&p.kind)) {
             return i;
         }
-        let focused_is_chart = matches!(self.panes.get(self.focus).map(|p| &p.kind), Some(PaneKind::Chart(_)));
-        if focused_is_chart {
-            if let Some(i) = self.panes.iter().position(|p| !matches!(p.kind, PaneKind::Chart(_))) {
-                return i;
-            }
-            if self.panes.len() > 1 {
-                return (self.focus + 1) % self.panes.len();
-            }
+        let disc = |i: usize| std::mem::discriminant(&self.panes[i].kind);
+        let n = self.panes.len();
+        if let Some(i) = (0..n).rev().find(|&i| !matches!(self.panes[i].kind, PaneKind::Chart(_)) && (0..n).any(|j| j != i && disc(j) == disc(i))) {
+            return i;
         }
-        self.focus
+        let candidates: Vec<usize> = (0..n).filter(|&i| !matches!(self.panes[i].kind, PaneKind::Chart(_))).collect();
+        if let Some(&i) = candidates.iter().find(|&&i| Some(i) != self.last_opened && i != self.focus) {
+            return i;
+        }
+        if let Some(&i) = candidates.first() {
+            return i;
+        }
+        if n > 1 { (self.focus + 1) % n } else { self.focus }
     }
 
     fn chart_index(&mut self) -> usize {
@@ -333,6 +343,7 @@ impl TerminalApp {
         let idx = self.target_pane(|k| std::mem::discriminant(k) == disc);
         self.replace_pane(idx, kind);
         self.focus = idx;
+        self.last_opened = Some(idx);
     }
 
     fn run_actions(&mut self, actions: Vec<Action>) {
@@ -534,23 +545,41 @@ impl TerminalApp {
 
     // ---- input ---------------------------------------------------------------------------
 
-    fn hotkeys(&mut self, ctx: &egui::Context, cmd_focused: bool) {
-        let other_text_focused = !cmd_focused && ctx.memory(|m| m.focused()).is_some();
-        let mut typed = String::new();
-        let (alt, events) = ctx.input(|i| (i.modifiers.alt, i.events.clone()));
-        if !cmd_focused && !other_text_focused && !alt {
-            for e in &events {
-                if let Event::Text(t) = e {
-                    typed.push_str(t);
+    /// Global and chart hotkeys. Runs before the command line so it can claim keys; when
+    /// the command line holds text, keys belong to it.
+    fn hotkeys(&mut self, ctx: &egui::Context) {
+        let cmd_id = egui::Id::new("command-line");
+        let focused = ctx.memory(|m| m.focused());
+        let cmd_focused = focused == Some(cmd_id);
+        let other_text_focused = focused.is_some() && !cmd_focused;
+        if other_text_focused {
+            return;
+        }
+        if !cmd_focused {
+            // Type-anywhere: capture keystrokes until the command line has focus.
+            // Judge modifiers per key event: the Alt release can arrive in the same frame
+            // as Alt+T, so the frame-level modifier state is unreliable.
+            let typed: String = ctx.input(|i| {
+                let mut chord = false;
+                let mut out = String::new();
+                for e in &i.events {
+                    match e {
+                        Event::Key { pressed: true, modifiers, .. } => chord = modifiers.alt || modifiers.ctrl || modifiers.command,
+                        Event::Text(t) if !chord => out.push_str(t),
+                        _ => {}
+                    }
+                }
+                out
+            });
+            if !typed.is_empty() {
+                let starts = !self.cmd.is_empty() || typed.chars().next().is_some_and(|c| c.is_ascii_alphanumeric() || c == '^' || c == '?');
+                if starts {
+                    self.cmd.push_str(&typed.to_ascii_uppercase());
+                    self.focus_cmd = true;
                 }
             }
-            let starter = typed.chars().next().is_some_and(|c| c.is_ascii_alphanumeric() || c == '^' || c == '?');
-            if starter {
-                self.cmd = typed.to_ascii_uppercase();
-                self.focus_cmd = true;
-            }
         }
-        if cmd_focused || other_text_focused {
+        if !self.cmd.is_empty() {
             return;
         }
         let pressed = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_key(m, k));
@@ -658,6 +687,8 @@ impl TerminalApp {
                 self.execute(&input);
             }
             self.cmd_hist_pos = None;
+            // The command line stays live, Bloomberg-style.
+            self.focus_cmd = true;
         } else if focused && esc {
             self.cmd.clear();
             resp.surrender_focus();
@@ -713,7 +744,7 @@ impl TerminalApp {
 
     fn watchlist(&mut self, ui: &mut Ui) -> Vec<Action> {
         let mut out = Vec::new();
-        ui.label(RichText::new("SYMBOL       LAST       CHG      CHG%").font(mono(11.5)).color(AMBER).background_color(theme::HEADER));
+        ui.add(egui::Label::new(RichText::new("SYMBOL       LAST       CHG      CHG%").font(mono(11.5)).color(AMBER).background_color(theme::HEADER)).extend());
         let mut remove = None;
         for s in &self.watchlist {
             ui.horizontal(|ui| {
@@ -816,8 +847,8 @@ impl eframe::App for TerminalApp {
         let bottom = Rect::from_min_max(pos2(screen.left(), screen.bottom() - BOTTOM_H), screen.max);
         let area = Rect::from_min_max(pos2(screen.left() + 2.0, top.bottom() + 2.0), pos2(screen.right() - 2.0, bottom.top() - 2.0));
 
-        let cmd_focused = self.top_bar(ui, top);
-        self.hotkeys(&ctx, cmd_focused);
+        self.hotkeys(&ctx);
+        self.top_bar(ui, top);
         self.bottom_bar(ui, bottom);
 
         let rects = self.layout.rects(area, 3.0);
