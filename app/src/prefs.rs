@@ -181,6 +181,16 @@ pub enum Action {
     PopOut,
     SaveLayout,
     Settings,
+    NewChart,
+    NewWatchlist,
+    NewNews,
+    NewOrderBook,
+    NewWorldMarkets,
+    NewYieldCurve,
+    NewCongress,
+    NewPoliticians,
+    NewAlerts,
+    NewSearch,
     DrawTrendline,
     DrawHorizontal,
     DrawVertical,
@@ -200,7 +210,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 33] = [
+    pub const ALL: [Action; 43] = [
         Action::Help,
         Action::Congress,
         Action::Politicians,
@@ -218,6 +228,16 @@ impl Action {
         Action::PopOut,
         Action::SaveLayout,
         Action::Settings,
+        Action::NewChart,
+        Action::NewWatchlist,
+        Action::NewNews,
+        Action::NewOrderBook,
+        Action::NewWorldMarkets,
+        Action::NewYieldCurve,
+        Action::NewCongress,
+        Action::NewPoliticians,
+        Action::NewAlerts,
+        Action::NewSearch,
         Action::DrawTrendline,
         Action::DrawHorizontal,
         Action::DrawVertical,
@@ -255,6 +275,17 @@ impl Action {
             Action::PopOut => "Pop out pane".into(),
             Action::SaveLayout => "Save layout".into(),
             Action::Settings => "Settings".into(),
+            Action::NewChart => "New Chart pane".into(),
+            Action::NewWatchlist => "New Watchlist pane".into(),
+            Action::NewNews => "New News pane".into(),
+            Action::NewOrderBook => "New Order book pane".into(),
+            Action::NewWorldMarkets => "New World markets pane".into(),
+            Action::NewYieldCurve => "New Yield curve pane".into(),
+            Action::NewCongress => "New Congress feed pane".into(),
+            Action::NewPoliticians => "New Politicians pane".into(),
+            Action::NewAlerts => "New Alerts pane".into(),
+            Action::NewSearch => "New Security search pane".into(),
+
             Action::DrawTrendline => "Draw trendline".into(),
             Action::DrawHorizontal => "Draw horizontal line".into(),
             Action::DrawVertical => "Draw vertical line".into(),
@@ -264,6 +295,51 @@ impl Action {
             Action::Magnet => "Toggle magnet".into(),
             a => format!("Switch to layout {}", a.layout_slot().unwrap_or(0) + 1),
         }
+    }
+
+    /// Group shown in the hotkey tables.
+    pub fn category(self) -> &'static str {
+        use Action as A;
+        match self {
+            a if a.panel_spec().is_some() => "New panels",
+            A::NextPane
+            | A::PrevPane
+            | A::ToggleSidebar
+            | A::SplitRight
+            | A::SplitDown
+            | A::NewTab
+            | A::ClosePane
+            | A::PopOut
+            | A::Settings => "Workspace",
+            a if a.layout_slot().is_some() || a == A::SaveLayout => "Layouts",
+            A::DrawTrendline
+            | A::DrawHorizontal
+            | A::DrawVertical
+            | A::DrawFib
+            | A::ResetView
+            | A::LogScale
+            | A::Magnet => "Chart",
+            _ => "Panels and data",
+        }
+    }
+
+    pub const CATEGORIES: [&'static str; 5] = ["New panels", "Panels and data", "Workspace", "Layouts", "Chart"];
+
+    /// The panel command word for `New…` actions.
+    pub fn panel_spec(self) -> Option<&'static str> {
+        Some(match self {
+            Action::NewChart => "CHART",
+            Action::NewWatchlist => "WL",
+            Action::NewNews => "NEWS",
+            Action::NewOrderBook => "BOOK",
+            Action::NewWorldMarkets => "WEI",
+            Action::NewYieldCurve => "GC",
+            Action::NewCongress => "CONG",
+            Action::NewPoliticians => "POL",
+            Action::NewAlerts => "ALRT",
+            Action::NewSearch => "SECF",
+            _ => return None,
+        })
     }
 
     /// Index into the saved-layout list for `Layout1..Layout9`.
@@ -371,6 +447,24 @@ impl Chord {
         s
     }
 
+    /// Key-cap labels, modifiers first (⌃ ⌥ ⇧ ⌘ on macOS, words elsewhere).
+    pub fn tokens(&self) -> Vec<String> {
+        let mac = cfg!(target_os = "macos");
+        let mut t = Vec::new();
+        let mods = if mac {
+            [(self.ctrl, "⌃"), (self.alt, "⌥"), (self.shift, "⇧"), (self.command, "⌘")]
+        } else {
+            [(self.ctrl || self.command, "Ctrl"), (self.alt, "Alt"), (self.shift, "Shift"), (false, "")]
+        };
+        for (on, label) in mods {
+            if on {
+                t.push(label.to_string());
+            }
+        }
+        t.push(self.key.symbol_or_name().to_string());
+        t
+    }
+
     pub fn matches(&self, key: Key, m: Modifiers) -> bool {
         *self == Chord::from_event(key, m)
     }
@@ -412,8 +506,12 @@ impl Default for Keymap {
         bind(Action::ResetView, "Alt+R");
         bind(Action::LogScale, "Alt+L");
         bind(Action::Magnet, "Alt+M");
+        // ⌘1…⌘9, ⌘0 open panels; ⌥1…⌥9 switch saved layouts.
+        for (i, a) in Action::ALL.iter().filter(|a| a.panel_spec().is_some()).enumerate() {
+            bind(*a, &format!("Cmd+{}", (i + 1) % 10));
+        }
         for (i, a) in Action::ALL.iter().filter(|a| a.layout_slot().is_some()).enumerate() {
-            bind(*a, &format!("Cmd+{}", i + 1));
+            bind(*a, &format!("Alt+{}", i + 1));
         }
         Keymap(m)
     }
@@ -452,20 +550,52 @@ impl Keymap {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub const PREFS_VERSION: u32 = 2;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Prefs {
+    /// File format revision, for migrating defaults (absent in v1 files, hence 0).
+    #[serde(default)]
+    pub version: u32,
     pub appearance: Appearance,
     pub hotkeys: Keymap,
     pub panels: PanelDefaults,
 }
 
+impl Default for Prefs {
+    fn default() -> Self {
+        Self {
+            version: PREFS_VERSION,
+            appearance: Appearance::default(),
+            hotkeys: Keymap::default(),
+            panels: PanelDefaults::default(),
+        }
+    }
+}
+
 impl Prefs {
     pub fn load(path: &std::path::Path) -> Prefs {
         let mut p: Prefs = std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        p.migrate();
         p.hotkeys = p.hotkeys.with_defaults();
         p.appearance.font_scale = p.appearance.font_scale.clamp(0.7, 1.6);
         p
+    }
+
+    /// Upgrade older files. v2 moved saved-layout switching from ⌘1…⌘9 to ⌥1…⌥9 so ⌘1…⌘0
+    /// can open panels; bindings the user changed are left alone.
+    pub fn migrate(&mut self) {
+        if self.version < 2 {
+            let layouts = Action::ALL.iter().filter(|a| a.layout_slot().is_some());
+            for (i, a) in layouts.enumerate() {
+                let old = Chord::parse(&format!("Cmd+{}", i + 1));
+                if self.hotkeys.0.get(a).and_then(|s| Chord::parse(s)) == old {
+                    self.hotkeys.0.remove(a);
+                }
+            }
+        }
+        self.version = PREFS_VERSION;
     }
 
     pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
@@ -489,6 +619,9 @@ mod tests {
         assert!(Chord::parse("Cmd+NotAKey").is_none());
         assert!(Chord::parse("AltLeft").is_none(), "a bare modifier is not a binding");
         assert!(is_modifier(Key::SuperRight) && !is_modifier(Key::F9));
+        let t = Chord::parse("Cmd+Shift+D").unwrap().tokens();
+        assert_eq!(t.len(), 3, "two modifiers and the key");
+        assert_eq!(t.last().map(String::as_str), Some("D"));
         assert!(c.matches(Key::T, Modifiers::ALT));
         assert!(!c.matches(Key::T, Modifiers::ALT | Modifiers::SHIFT), "modifiers match exactly");
     }
@@ -499,7 +632,18 @@ mod tests {
         assert_eq!(k.action_for(Key::F1, Modifiers::NONE), Some(Action::Help));
         assert_eq!(k.action_for(Key::Tab, Modifiers::SHIFT), Some(Action::PrevPane));
         assert_eq!(k.action_for(Key::Tab, Modifiers::NONE), Some(Action::NextPane));
-        assert_eq!(k.action_for(Key::Num3, Modifiers::COMMAND), Some(Action::Layout3));
+        assert_eq!(k.action_for(Key::Num1, Modifiers::COMMAND), Some(Action::NewChart));
+        assert_eq!(k.action_for(Key::Num0, Modifiers::COMMAND), Some(Action::NewSearch));
+        assert_eq!(k.action_for(Key::Num3, Modifiers::ALT), Some(Action::Layout3));
+        // Every action has a default binding, and no two share one.
+        let chords: Vec<Chord> = Action::ALL.iter().filter_map(|a| k.chord(*a)).collect();
+        assert_eq!(chords.len(), Action::ALL.len());
+        for (i, c) in chords.iter().enumerate() {
+            assert!(!chords[i + 1..].contains(c), "duplicate default {}", c.format());
+        }
+        for a in Action::ALL {
+            assert!(Action::CATEGORIES.contains(&a.category()), "{a:?}");
+        }
         // Rebinding a used chord steals it from the previous action.
         let displaced = k.bind(Action::Settings, Chord::parse("F1").unwrap());
         assert_eq!(displaced, Some(Action::Help));
@@ -536,5 +680,25 @@ mod tests {
         p.save(&path).unwrap();
         assert_eq!(Prefs::load(&path), p);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn v1_prefs_migrate_layout_bindings_to_alt() {
+        // A v1 file: layouts on ⌘1…, one customised, no panel actions yet.
+        let mut v1 = Keymap::default();
+        v1.0.retain(|a, _| a.panel_spec().is_none());
+        for (i, a) in Action::ALL.iter().filter(|a| a.layout_slot().is_some()).enumerate() {
+            v1.0.insert(*a, format!("Cmd+{}", i + 1));
+        }
+        v1.0.insert(Action::Layout9, "F9".into());
+        let parsed: Prefs = serde_json::from_str(r#"{"hotkeys":{"Layout1":"Cmd+1"}}"#).unwrap();
+        assert_eq!(parsed.version, 0, "files without a version are v1");
+        let mut p = Prefs { version: 0, hotkeys: v1, ..Default::default() };
+        p.migrate();
+        p.hotkeys = p.hotkeys.with_defaults();
+        assert_eq!(p.version, PREFS_VERSION);
+        assert_eq!(p.hotkeys.action_for(Key::Num1, Modifiers::COMMAND), Some(Action::NewChart));
+        assert_eq!(p.hotkeys.action_for(Key::Num1, Modifiers::ALT), Some(Action::Layout1));
+        assert_eq!(p.hotkeys.action_for(Key::F9, Modifiers::NONE), Some(Action::Layout9), "customised binding kept");
     }
 }

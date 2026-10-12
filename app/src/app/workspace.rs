@@ -62,6 +62,106 @@ enum GroupCmd {
     Rename(PaneId, String),
 }
 
+/// Pointer travel (points) before a press on a tab becomes a drag.
+const DRAG_THRESHOLD: f32 = 5.0;
+
+/// Where a dragged pane would land.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DropTarget {
+    /// Dock path to insert relative to (`[]` = the whole window).
+    pub path: Vec<usize>,
+    pub zone: Zone,
+    /// Highlighted landing area.
+    pub preview: Rect,
+    /// Index of the hovered group, if any (window-edge docking has none).
+    pub group: Option<usize>,
+    /// Dropping here would change nothing.
+    pub noop: bool,
+}
+
+impl DropTarget {
+    pub fn label(&self) -> &'static str {
+        match (self.group.is_some(), self.zone) {
+            (_, Zone::Center) => "Add as Tab",
+            (true, Zone::Left) => "Split Left",
+            (true, Zone::Right) => "Split Right",
+            (true, Zone::Top) => "Split Above",
+            (true, Zone::Bottom) => "Split Below",
+            (false, Zone::Left) => "Dock at Left Edge",
+            (false, Zone::Right) => "Dock at Right Edge",
+            (false, Zone::Top) => "Dock at Top Edge",
+            (false, Zone::Bottom) => "Dock at Bottom Edge",
+        }
+    }
+}
+
+/// The five compass targets drawn at the centre of a hovered pane.
+fn compass(rect: Rect) -> [(Zone, Rect); 5] {
+    let c = rect.center();
+    let s = (rect.width().min(rect.height()) / 7.0).clamp(18.0, 30.0);
+    let d = s + 6.0;
+    let at = |dx: f32, dy: f32| Rect::from_center_size(c + vec2(dx, dy), vec2(s, s));
+    [
+        (Zone::Center, at(0.0, 0.0)),
+        (Zone::Left, at(-d, 0.0)),
+        (Zone::Right, at(d, 0.0)),
+        (Zone::Top, at(0.0, -d)),
+        (Zone::Bottom, at(0.0, d)),
+    ]
+}
+
+/// Resolve the drop target under `pos`: a window edge, a compass button, or the nearest
+/// zone of the pane under the pointer.
+pub fn drop_target(area: Rect, groups: &[crate::dock::Group], pos: egui::Pos2, dragged: PaneId) -> Option<DropTarget> {
+    let edge = 18.0;
+    if area.expand(edge).contains(pos) {
+        let z = if pos.x < area.left() + edge {
+            Some(Zone::Left)
+        } else if pos.x > area.right() - edge {
+            Some(Zone::Right)
+        } else if pos.y < area.top() + edge {
+            Some(Zone::Top)
+        } else if pos.y > area.bottom() - edge {
+            Some(Zone::Bottom)
+        } else {
+            None
+        };
+        if let Some(z) = z {
+            let alone = groups.len() == 1 && groups[0].panes == [dragged];
+            return Some(DropTarget { path: Vec::new(), zone: z, preview: z.preview(area), group: None, noop: alone });
+        }
+    }
+    let (gi, g) = groups.iter().enumerate().find(|(_, g)| g.rect.contains(pos))?;
+    let zone = compass(g.rect)
+        .into_iter()
+        .find(|(_, r)| r.expand(3.0).contains(pos))
+        .map(|(z, _)| z)
+        .unwrap_or_else(|| Zone::at(g.rect, pos));
+    // A pane alone in its group can't be docked relative to itself.
+    let noop = g.panes == [dragged];
+    Some(DropTarget { path: g.path.clone(), zone, preview: zone.preview(g.rect), group: Some(gi), noop })
+}
+
+fn draw_compass(layer: &egui::Painter, rect: Rect, current: Zone, noop: bool) {
+    let accent = theme::accent();
+    for (zone, r) in compass(rect) {
+        let hot = zone == current && !noop;
+        layer.rect_filled(r, 5.0, if hot { accent } else { theme::card().gamma_multiply(0.9) });
+        layer.rect_stroke(
+            r,
+            5.0,
+            Stroke::new(1.0, accent.gamma_multiply(if hot { 1.0 } else { 0.6 })),
+            StrokeKind::Inside,
+        );
+        // A glyph showing the half (or whole) the pane would take.
+        let inner = r.shrink(5.0);
+        let fill = zone.preview(inner);
+        let fg = if hot { Color32::WHITE } else { accent };
+        layer.rect_stroke(inner, 2.0, Stroke::new(1.0, fg.gamma_multiply(0.7)), StrokeKind::Inside);
+        layer.rect_filled(fill, 2.0, fg.gamma_multiply(if zone == Zone::Center { 0.35 } else { 0.8 }));
+    }
+}
+
 fn tab_h() -> f32 {
     dp(28.0)
 }
@@ -793,6 +893,7 @@ impl TerminalApp {
         let btn =
             |i: f32| Rect::from_min_size(pos2(strip.right() - 28.0 * i - 2.0, strip.top() + 2.0), vec2(26.0, th - 4.0));
         let tabs_right = btn(2.0).left() - 4.0;
+        let press = ui.input(|i| if i.pointer.primary_pressed() { i.pointer.press_origin() } else { None });
         let mut x = strip.left() + 4.0;
         let n = g.panes.len().max(1) as f32;
         let max_w = ((tabs_right - x) / n - 2.0).clamp(54.0, 220.0);
@@ -877,14 +978,35 @@ impl TerminalApp {
             if resp.double_clicked() {
                 cmds.push(GroupCmd::StartRename(pid));
             }
-            if resp.drag_started() {
-                self.drag = Some(super::Drag { pane: pid });
+            // Drags are tracked from the press itself (see `drag_and_drop`) rather than
+            // egui's widget drag state, so quick trackpad gestures whose press and first
+            // movement land in the same frame still pick the tab up.
+            if !renaming
+                && let Some(p) = press
+                && tr.contains(p)
+                && !close.contains(p)
+            {
+                self.drag = Some(super::Drag { pane: pid, origin: p, active: false });
             }
             resp.on_hover_text(format!(
                 "{title}\nDrag to move or dock · double-click to rename · middle-click to close"
             ))
             .context_menu(|ui| tab_menu(ui, pid, link, cmds));
             x += w + 2.0;
+        }
+
+        // The empty part of the header strip drags the active pane too.
+        if let Some(p) = press
+            && self.drag.is_none()
+            && strip.contains(p)
+            && p.x < tabs_right
+            && self.renaming_tab.is_none()
+        {
+            self.drag = Some(super::Drag { pane: active, origin: p, active: false });
+        }
+        let strip_hover = ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| strip.contains(p) && p.x < tabs_right);
+        if strip_hover && self.drag.is_none() {
+            ui.ctx().set_cursor_icon(CursorIcon::Grab);
         }
 
         // Group buttons.
@@ -939,65 +1061,125 @@ impl TerminalApp {
         let pressed_here = ui.input(|inp| {
             inp.pointer.primary_pressed() && inp.pointer.interact_pos().is_some_and(|p| g.rect.contains(p))
         });
-        if (clicked || pressed_here) && self.drag.is_none() {
+        if (clicked || pressed_here) && self.drag.is_none_or(|d| !d.active) {
             self.focus = active;
         }
     }
 
-    /// While a tab is dragged: highlight the drop zone; on release, move the pane there.
+    /// Pane drag and drop. A press on a tab or header starts a pending drag; past a small
+    /// threshold it becomes active: a ghost of the pane follows the pointer, the hovered
+    /// pane shows a five-way dock compass, and the landing area is highlighted and labelled.
+    /// Release drops; Esc or releasing over nothing cancels.
     fn drag_and_drop(&mut self, ui: &mut Ui, area: Rect, groups: &[crate::dock::Group]) {
-        let Some(drag) = self.drag else { return };
-        let (pos, released) = ui.input(|i| (i.pointer.latest_pos(), !i.pointer.primary_down()));
+        let Some(mut drag) = self.drag else { return };
+        let (pos, down, esc) =
+            ui.input(|i| (i.pointer.latest_pos(), i.pointer.primary_down(), i.key_pressed(egui::Key::Escape)));
+        if esc {
+            self.drag = None;
+            return;
+        }
+        if !drag.active {
+            // Released before moving: that was a click.
+            if !down {
+                self.drag = None;
+                return;
+            }
+            if pos.is_some_and(|p| p.distance(drag.origin) > DRAG_THRESHOLD) {
+                drag.active = true;
+                self.drag = Some(drag);
+            } else {
+                return;
+            }
+        }
         let Some(pos) = pos else {
-            if released {
+            if !down {
                 self.drag = None;
             }
             return;
         };
         ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
-        // Window edges dock at the root; otherwise the group under the pointer.
-        let edge = 22.0;
-        let root_zone = if pos.x < area.left() + edge {
-            Some(Zone::Left)
-        } else if pos.x > area.right() - edge {
-            Some(Zone::Right)
-        } else if pos.y < area.top() + edge {
-            Some(Zone::Top)
-        } else if pos.y > area.bottom() - edge {
-            Some(Zone::Bottom)
-        } else {
-            None
-        };
-        let target = match root_zone {
-            Some(z) if area.expand(edge).contains(pos) => Some((Vec::new(), z, z.preview(area), false)),
-            _ => groups.iter().find(|g| g.rect.contains(pos)).map(|g| {
-                let z = Zone::at(g.rect, pos);
-                // Dropping a lone tab back onto its own group does nothing.
-                let noop = g.panes == [drag.pane];
-                (g.path.clone(), z, z.preview(g.rect), noop)
-            }),
-        };
+        let target = drop_target(area, groups, pos, drag.pane);
         let layer = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, Id::new("dock-drop")));
-        if let Some((_, _, preview, noop)) = &target
-            && !noop
-        {
-            let r = preview.shrink(4.0);
-            layer.rect_filled(r, theme::CARD_RADIUS, theme::accent().gamma_multiply(0.18));
-            layer.rect_stroke(r, theme::CARD_RADIUS, Stroke::new(2.0, theme::accent()), StrokeKind::Inside);
+        let accent = theme::accent();
+        // Every pane is a potential target: outline them faintly.
+        for g in groups {
+            layer.rect_stroke(
+                g.rect.shrink(1.0),
+                theme::CARD_RADIUS,
+                Stroke::new(1.0, accent.gamma_multiply(0.35)),
+                StrokeKind::Inside,
+            );
         }
-        let title = self.idx(drag.pane).map(|i| self.panes[i].display_title()).unwrap_or_default();
-        let g = layer.layout_no_wrap(title, ui_font(12.0), Color32::WHITE);
-        let chip = Rect::from_min_size(pos + vec2(12.0, 10.0), g.size() + vec2(16.0, 8.0));
-        layer.rect_filled(chip, 6.0, theme::accent());
-        layer.galley(chip.min + vec2(8.0, 4.0), g, Color32::WHITE);
+        if let Some(t) = &target {
+            if let Some(g) = t.group.and_then(|i| groups.get(i)) {
+                draw_compass(&layer, g.rect, t.zone, t.noop);
+            }
+            if !t.noop {
+                let r = t.preview.shrink(4.0);
+                layer.rect_filled(r, theme::CARD_RADIUS, accent.gamma_multiply(0.20));
+                layer.rect_stroke(r, theme::CARD_RADIUS, Stroke::new(2.0, accent), StrokeKind::Inside);
+                let label = t.label();
+                let lg = layer.layout_no_wrap(label.into(), ui_font(12.5), Color32::WHITE);
+                let pill = Rect::from_center_size(pos2(r.center().x, r.top() + 22.0), lg.size() + vec2(18.0, 8.0));
+                layer.rect_filled(pill, 8.0, accent);
+                layer.galley(pill.min + vec2(9.0, 4.0), lg, Color32::WHITE);
+            }
+        }
+        self.draw_ghost(&layer, drag.pane, pos);
         ui.ctx().request_repaint();
-        if released {
+        if !down {
             self.drag = None;
-            if let Some((path, zone, _, false)) = target {
-                self.dock.insert_at(&path, zone, drag.pane);
+            if let Some(t) = target.filter(|t| !t.noop) {
+                self.dock.insert_at(&t.path, t.zone, drag.pane);
                 self.focus = drag.pane;
                 self.preset = None;
+                self.status = format!(
+                    "Moved {}: {}",
+                    self.idx(drag.pane).map(|i| self.panes[i].display_title()).unwrap_or_default(),
+                    t.label()
+                );
             }
+        }
+    }
+
+    /// A translucent miniature of the dragged pane following the pointer.
+    fn draw_ghost(&self, layer: &egui::Painter, pane: PaneId, pos: egui::Pos2) {
+        let Some(i) = self.idx(pane) else { return };
+        let p = &self.panes[i];
+        let r = Rect::from_min_size(pos + vec2(22.0, 20.0), vec2(168.0, 96.0));
+        layer.rect_filled(r.translate(vec2(0.0, 4.0)), theme::CARD_RADIUS, Color32::from_black_alpha(60));
+        layer.rect_filled(r, theme::CARD_RADIUS, theme::card().gamma_multiply(0.92));
+        layer.rect_stroke(r, theme::CARD_RADIUS, Stroke::new(1.5, theme::accent()), StrokeKind::Inside);
+        let strip = Rect::from_min_size(r.min, vec2(r.width(), 24.0));
+        layer.rect_filled(
+            strip,
+            CornerRadius { nw: theme::CARD_RADIUS, ne: theme::CARD_RADIUS, sw: 0, se: 0 },
+            theme::header(),
+        );
+        let mut x = strip.left() + 8.0;
+        if let Some(l) = p.link {
+            layer.circle_filled(pos2(x + 3.0, strip.center().y), 3.5, l.color());
+            x += 10.0;
+        }
+        let code = layer.layout_no_wrap(p.kind.code().into(), mono(10.0), amber());
+        let cw = code.size().x;
+        layer.galley(pos2(x, strip.center().y - code.size().y / 2.0), code, amber());
+        layer.with_clip_rect(strip.shrink(2.0)).text(
+            pos2(x + cw + 6.0, strip.center().y),
+            Align2::LEFT_CENTER,
+            p.display_title(),
+            ui_font(12.0),
+            text(),
+        );
+        // Placeholder content lines.
+        for k in 0..4 {
+            let y = strip.bottom() + 12.0 + k as f32 * 15.0;
+            let w = [130.0, 100.0, 140.0, 80.0][k];
+            layer.rect_filled(
+                Rect::from_min_size(pos2(r.left() + 10.0, y), vec2(w, 6.0)),
+                3.0,
+                theme::muted().gamma_multiply(0.25),
+            );
         }
     }
 
@@ -1160,5 +1342,48 @@ fn tab_menu(ui: &mut Ui, pid: PaneId, link: Option<Link>, cmds: &mut Vec<GroupCm
     if ui.button("Close").clicked() {
         cmds.push(GroupCmd::Close(pid));
         ui.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dock::Node;
+
+    fn groups(n: &Node) -> (Rect, Vec<crate::dock::Group>) {
+        let area = Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 600.0));
+        (area, n.layout(area, 6.0).0)
+    }
+
+    #[test]
+    fn drop_targets_cover_edges_compass_and_zones() {
+        let n = Node::preset(Layout::TwoCols, &[1, 2]);
+        let (area, gs) = groups(&n);
+        // Window edges dock at the root.
+        let t = drop_target(area, &gs, pos2(5.0, 300.0), 2).unwrap();
+        assert_eq!((t.path.clone(), t.zone, t.group, t.noop), (vec![], Zone::Left, None, false));
+        assert_eq!(t.label(), "Dock at Left Edge");
+        // The compass centre of the right pane adds a tab; its left button splits left.
+        let right = gs[1].rect;
+        let t = drop_target(area, &gs, right.center(), 1).unwrap();
+        assert_eq!((t.zone, t.group, t.noop), (Zone::Center, Some(1), false));
+        let (_, left_btn) = compass(right)[1];
+        let t = drop_target(area, &gs, left_btn.center(), 1).unwrap();
+        assert_eq!(t.zone, Zone::Left);
+        assert_eq!(t.label(), "Split Left");
+        // Away from the compass, the nearest edge wins.
+        let t = drop_target(area, &gs, pos2(right.left() + 30.0, right.top() + 300.0), 1).unwrap();
+        assert_eq!(t.zone, Zone::Left);
+        // A lone pane over its own group is a no-op; outside every pane there is no target.
+        assert!(drop_target(area, &gs, right.center(), 2).unwrap().noop);
+        assert!(drop_target(area, &gs, pos2(500.0, 300.0), 1).is_none(), "the gap between panes");
+        // Applying a target moves the pane.
+        let mut m = n.clone();
+        let t = drop_target(area, &gs, left_btn.center(), 1).unwrap();
+        m.insert_at(&t.path, t.zone, 1);
+        assert_eq!(m.visible(), vec![1, 2]);
+        let t = drop_target(area, &gs, pos2(500.0, 595.0), 1).unwrap();
+        m.insert_at(&t.path, t.zone, 1);
+        assert!(matches!(&m, Node::Split { dir: Dir::Column, .. }));
     }
 }

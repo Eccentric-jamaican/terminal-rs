@@ -81,7 +81,9 @@ impl TerminalApp {
             self.settings_tab = SettingsTab::ALL[i];
             self.rebinding = None;
         }
+        let width = ui.available_width() - 14.0;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            ui.set_max_width(width);
             ui.spacing_mut().item_spacing.y = theme::dp(6.0);
             match self.settings_tab {
                 SettingsTab::Appearance => self.appearance_tab(ui, &mut cmds),
@@ -176,37 +178,7 @@ impl TerminalApp {
 
     fn hotkeys_tab(&mut self, ui: &mut Ui, cmds: &mut Vec<SettingsCmd>) {
         section(ui, "Keyboard shortcuts");
-        ui.label(
-            RichText::new("Click a shortcut, then press the new key combination (Esc cancels). Shortcuts with ⌘/Ctrl or Alt work while typing a command.")
-                .font(ui_font(11.5))
-                .color(muted()),
-        );
-        egui::Grid::new("hotkeys").num_columns(3).spacing([16.0, 4.0]).striped(true).show(ui, |ui| {
-            for action in Action::ALL {
-                ui.label(RichText::new(action.label()).font(ui_font(12.5)));
-                let capturing = self.rebinding == Some(action);
-                let current = self.prefs.hotkeys.chord(action).map(|c| c.display()).unwrap_or_else(|| "—".into());
-                let label = if capturing { "Press keys…".to_string() } else { current };
-                let b =
-                    egui::Button::new(RichText::new(label).font(theme::mono(12.0))).min_size(egui::vec2(140.0, 20.0));
-                if ui.add(b.selected(capturing)).clicked() {
-                    self.rebinding = if capturing { None } else { Some(action) };
-                }
-                if self.prefs.hotkeys.0.contains_key(&action) {
-                    if ui.small_button("Clear").clicked() {
-                        self.prefs.hotkeys.0.remove(&action);
-                        cmds.push(SettingsCmd::SavePrefs);
-                    }
-                } else {
-                    ui.label("");
-                }
-                ui.end_row();
-            }
-        });
-        ui.add_space(8.0);
-        if ui.button("Restore Default Shortcuts").clicked() {
-            self.prefs.hotkeys = prefs::Keymap::default();
-            self.rebinding = None;
+        if self.hotkey_table(ui) {
             cmds.push(SettingsCmd::SavePrefs);
         }
     }

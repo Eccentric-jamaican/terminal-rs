@@ -18,9 +18,10 @@ use crate::markets_view;
 use crate::theme::{self, amber, mono, muted, text, ui_font};
 use crate::widgets::{self, Icon};
 
-/// Toolbar height; on macOS it matches a unified `NSToolbar` so the traffic lights centre in it.
+/// Default toolbar height; on macOS it matches a unified `NSToolbar` so the traffic lights
+/// centre in it. The live value comes from [`TerminalApp::toolbar_h`].
 pub const TOOLBAR_H: f32 = if cfg!(target_os = "macos") { tr_macos::TITLEBAR_HEIGHT } else { 44.0 };
-/// Space kept clear for the traffic lights when the sidebar is collapsed.
+/// Default space kept clear for the traffic lights when the sidebar is collapsed.
 pub const TRAFFIC_INSET: f32 = if cfg!(target_os = "macos") { tr_macos::TRAFFIC_LIGHTS_WIDTH } else { 0.0 };
 pub const STATUS_H: f32 = 24.0;
 pub const SIDEBAR_W: f32 = 232.0;
@@ -47,6 +48,25 @@ fn window_drag_region(ui: &Ui, rect: Rect, salt: &str) {
 }
 
 impl TerminalApp {
+    /// Toolbar height: at least the system title bar region on macOS, so nothing interactive
+    /// sits under the window's native drag area (which would swallow clicks and drags).
+    pub(super) fn toolbar_h(&self) -> f32 {
+        match self.chrome {
+            Some(c) if c.titlebar_height > 0.0 => c.titlebar_height.max(TOOLBAR_H),
+            // Full screen: no title bar strip.
+            Some(_) => 44.0,
+            None => TOOLBAR_H,
+        }
+    }
+
+    pub(super) fn traffic_inset(&self) -> f32 {
+        match self.chrome {
+            Some(c) if c.titlebar_height > 0.0 => c.traffic_lights_width.max(0.0),
+            Some(_) => 0.0,
+            None => TRAFFIC_INSET,
+        }
+    }
+
     // ---- toolbar -------------------------------------------------------------------------
 
     /// Unified toolbar: sidebar toggle, title, command line, layout picker, actions, clock.
@@ -377,7 +397,7 @@ impl TerminalApp {
         let p = ui.painter();
         p.rect_filled(rect, 0.0, theme::sidebar());
         p.vline(rect.right() - 0.5, rect.y_range(), Stroke::new(1.0, theme::border()));
-        let head = Rect::from_min_size(rect.min, vec2(rect.width(), TOOLBAR_H));
+        let head = Rect::from_min_size(rect.min, vec2(rect.width(), self.toolbar_h()));
         window_drag_region(ui, head, "sidebar");
         if !cfg!(target_os = "macos") {
             p.text(head.left_center() + vec2(14.0, 0.0), Align2::LEFT_CENTER, "TERMINAL-RS", mono(12.5), amber());
@@ -672,7 +692,7 @@ impl TerminalApp {
         for (k, (msg, at)) in self.toasts.iter().enumerate() {
             let slide = anim::spring(ctx, Id::new(("toast", k, *at)), 0.0);
             let r = Rect::from_min_size(
-                pos2(screen.right() - 432.0 + slide, screen.top() + TOOLBAR_H + 10.0 + k as f32 * 58.0),
+                pos2(screen.right() - 432.0 + slide, screen.top() + self.toolbar_h() + 10.0 + k as f32 * 58.0),
                 vec2(420.0, 50.0),
             );
             widgets::card_on(&p, r, 0.0);

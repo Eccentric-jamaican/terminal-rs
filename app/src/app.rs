@@ -5,6 +5,7 @@
 //! content) and `settings_view` (preferences UI).
 
 mod chrome;
+mod hotkeys_view;
 mod panels;
 mod settings_view;
 mod workspace;
@@ -31,7 +32,7 @@ use crate::prefs::{self, Prefs};
 use crate::theme;
 use crate::worker::{Profile, Request, Response, Worker, data_dir};
 
-use chrome::{SIDEBAR_W, STATUS_H, SidebarCmd, TOOLBAR_H, TRAFFIC_INSET};
+use chrome::{SIDEBAR_W, STATUS_H, SidebarCmd};
 use settings_view::SettingsTab;
 
 pub enum PaneKind {
@@ -294,10 +295,13 @@ fn migrate_legacy(s: &Settings, defaults: &prefs::PanelDefaults) -> Option<Layou
     Some(LayoutDoc::preset("Default", s.layout.unwrap_or(Layout::Grid2x2), panes))
 }
 
-/// An in-progress tab drag.
+/// A pane drag from its tab or header: pending until the pointer moves past a small
+/// threshold (so clicks still select tabs), then active until release.
 #[derive(Debug, Clone, Copy)]
 pub struct Drag {
     pub pane: PaneId,
+    pub origin: egui::Pos2,
+    pub active: bool,
 }
 
 pub struct TerminalApp {
@@ -324,6 +328,7 @@ pub struct TerminalApp {
     prefs: Prefs,
     applied_appearance: Option<prefs::Appearance>,
     rebinding: Option<prefs::Action>,
+    hotkey_filter: String,
     settings_tab: SettingsTab,
     io_path: String,
 
@@ -371,6 +376,9 @@ pub struct TerminalApp {
     window_styled: bool,
     /// The window is see-through behind the sidebar (macOS vibrancy).
     vibrancy: bool,
+    /// Measured macOS title bar geometry (polled; changes with full screen).
+    chrome: Option<tr_macos::Chrome>,
+    last_chrome_poll: Option<Instant>,
 }
 
 /// Resolve a run of words (`BTCUSD CRNCY AAPL US EQUITY MSFT`) into market keys.
@@ -430,6 +438,7 @@ impl TerminalApp {
             applied_appearance: Some(prefs.appearance.clone()),
             prefs,
             rebinding: None,
+            hotkey_filter: String::new(),
             settings_tab: SettingsTab::Appearance,
             io_path: String::new(),
             curves: None,
@@ -466,6 +475,8 @@ impl TerminalApp {
             last_accent_poll: None,
             window_styled: false,
             vibrancy: false,
+            chrome: None,
+            last_chrome_poll: None,
         };
         let mut doc = None;
         if let Some(s) = &settings {
@@ -1014,7 +1025,9 @@ impl TerminalApp {
             A::LogScale => self.with_chart(|c, _| c.log = !c.log),
             A::Magnet => self.with_chart(|c, _| c.magnet = !c.magnet),
             a => {
-                if let Some(name) = a.layout_slot().and_then(|i| self.layout_names.get(i)).cloned() {
+                if let Some(spec) = a.panel_spec() {
+                    self.apply(Function::NewPanel(spec.into()));
+                } else if let Some(name) = a.layout_slot().and_then(|i| self.layout_names.get(i)).cloned() {
                     self.switch_layout(&name);
                 }
             }
@@ -1101,6 +1114,21 @@ fn style_native_window(_frame: &eframe::Frame, _vibrancy: bool) -> bool {
     false
 }
 
+/// The main window's live title bar geometry (macOS).
+#[cfg(target_os = "macos")]
+fn native_chrome(frame: &eframe::Frame) -> Option<tr_macos::Chrome> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let handle = frame.window_handle().ok()?;
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else { return None };
+    // SAFETY: main thread, live NSView owned by the window.
+    unsafe { tr_macos::chrome_metrics(h.ns_view.as_ptr()) }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn native_chrome(_frame: &eframe::Frame) -> Option<tr_macos::Chrome> {
+    None
+}
+
 impl eframe::App for TerminalApp {
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
         if self.vibrancy { [0.0; 4] } else { visuals.window_fill.to_normalized_gamma_f32() }
@@ -1116,6 +1144,14 @@ impl eframe::App for TerminalApp {
         if !self.window_styled {
             self.window_styled = true;
             self.vibrancy = style_native_window(frame, self.prefs.appearance.vibrancy);
+        }
+        if self.last_chrome_poll.is_none_or(|t| t.elapsed() > Duration::from_millis(750)) {
+            let c = native_chrome(frame);
+            if c != self.chrome {
+                tracing::info!("window chrome: {c:?}");
+                self.chrome = c;
+            }
+            self.last_chrome_poll = Some(Instant::now());
         }
         if self.last_accent_poll.is_none_or(|t| t.elapsed() > Duration::from_secs(3)) {
             if let Some([r, g, b]) = tr_macos::accent_color() {
@@ -1142,7 +1178,7 @@ impl eframe::App for TerminalApp {
         let sb_w = (SIDEBAR_W * open).round();
         let main = Rect::from_min_max(pos2(screen.left() + sb_w, screen.top()), screen.max);
         ui.painter().rect_filled(main, 0.0, theme::window());
-        let toolbar = Rect::from_min_size(main.min, vec2(main.width(), TOOLBAR_H));
+        let toolbar = Rect::from_min_size(main.min, vec2(main.width(), self.toolbar_h()));
         let status = Rect::from_min_max(pos2(main.left(), main.bottom() - STATUS_H), main.max);
         let gap = theme::dp(6.0);
         let area = Rect::from_min_max(
@@ -1161,7 +1197,7 @@ impl eframe::App for TerminalApp {
             child.set_clip_rect(Rect::from_min_max(screen.min, pos2(screen.left() + sb_w, screen.bottom())));
             sidebar_cmds = self.sidebar(&mut child, full);
         }
-        self.toolbar(ui, toolbar, (TRAFFIC_INSET - sb_w).max(0.0));
+        self.toolbar(ui, toolbar, (self.traffic_inset() - sb_w).max(0.0));
         self.status_bar(ui, status);
 
         let mut actions = Vec::new();

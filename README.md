@@ -79,8 +79,9 @@ systems**.
 
 - **Fully customizable workspace**
   - Free-form docking of any panel (chart, watchlist, news, order book, world markets, yield
-    curve, Congress feed, politicians, alerts, search, settings, help): drag a tab onto a pane's
-    centre to tab it or onto an edge to split, drag to a window edge to dock there, resize with
+    curve, Congress feed, politicians, alerts, search, settings, help): drag a tab (or a pane's
+    header) onto another pane and drop on the dock compass (centre adds a tab, arrows split),
+    with a ghost preview and a labelled landing highlight, or drag to a window edge to dock there, resize with
     dividers (double-click to equalise), tabs in every pane, and pop any pane out into its own
     native window (close it to dock back). Add panels from each pane's **+** menu or with
     `NEW <PANEL>` / `SPLIT [DOWN] <PANEL>`.
@@ -88,12 +89,14 @@ systems**.
     drives every linked chart, order book, news and per-ticker Congress pane; clicking a row in a
     linked watchlist or world-markets pane loads it into the group.
   - **Saved layouts**: save, name, rename, duplicate, delete and switch (`LAYOUT <name>`, the
-    sidebar list, ⌘1…⌘9); the active layout autosaves and is restored on launch. Each layout is
+    sidebar list, ⌥1…⌥9); the active layout autosaves and is restored on launch. Each layout is
     a JSON file in `~/Library/Application Support/terminal-rs/layouts` (`$XDG_DATA_HOME` on
     Linux) and can be imported or exported (`LAYOUT EXPORT`/`IMPORT`, or Settings › Layouts).
   - **Preferences** (`PREFS`, persisted in `prefs.json`): light/dark/system theme, accent, up/down
     and highlight colours, interface and number fonts, text size and density (compact, regular,
-    comfortable); every hotkey is rebindable; defaults for new charts and order books. Per-pane
+    comfortable); every hotkey is rebindable from a native shortcut table (click a binding, press the new
+    keys) in Settings and Help, and ⌘1…⌘0 open a new chart, watchlist, news, order book, world
+    markets, yield curve, Congress, politicians, alerts or search pane; defaults for new charts and order books. Per-pane
     settings (chart type, indicators, drawings, filters, depth, link, tab title) save with the layout.
   - **News** (Yahoo headlines; CoinDesk for crypto) and **order book** depth (live Binance book,
     Coinbase fallback; markets without a free public book show a clearly marked simulation).
@@ -123,7 +126,8 @@ current and previous year (a few minutes; it runs in the background while you wo
 Appearance: `TR_THEME=light|dark` overrides the system appearance, `TR_MSAA=1|2|4|8` sets
 chart anti-aliasing (default 4 on macOS), `TR_VIBRANCY=0` disables the translucent sidebar, and
 ⌃⌘S (Ctrl+Shift+S elsewhere) toggles the sidebar. `scripts/bundle-macos.sh` builds a retina-capable
-`terminal-rs.app`.
+`terminal-rs.app`; `scripts/check-macos-cross.sh` compiles and lints the whole workspace for
+aarch64-apple-darwin from Linux (zig as the C cross-compiler; linking needs the macOS SDK).
 
 Press **F1** (or type `HELP`) for the full command and hotkey list. Highlights:
 

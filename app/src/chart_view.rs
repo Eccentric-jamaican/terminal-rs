@@ -69,6 +69,8 @@ pub struct ChartState {
     last_indicator_req: Option<std::time::Instant>,
     /// App-level actions requested from this chart (context menu), drained by the app.
     pub actions: Vec<Action>,
+    /// False while a pane is being dragged over the workspace: no crosshair or hover cards.
+    pub hover_enabled: bool,
 }
 
 impl ChartState {
@@ -109,6 +111,7 @@ impl ChartState {
             last_live: None,
             last_indicator_req: None,
             actions: Vec::new(),
+            hover_enabled: true,
         }
     }
 
@@ -526,7 +529,7 @@ impl ChartState {
         if plot_resp.clicked() || plot_resp.drag_started() || axis_resp.clicked() || time_resp.clicked() {
             clicked = true;
         }
-        let hover = plot_resp.hover_pos().filter(|p| plot_all.contains(*p));
+        let hover = plot_resp.hover_pos().filter(|p| self.hover_enabled && plot_all.contains(*p));
         if self.draw.tool.is_none() {
             plot_resp.context_menu(|ui| self.context_menu(ui, w));
         }

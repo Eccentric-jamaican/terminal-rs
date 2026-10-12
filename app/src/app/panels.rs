@@ -17,7 +17,9 @@ impl TerminalApp {
     pub(super) fn render_content(&mut self, ui: &mut Ui, i: usize, rect: Rect, focused: bool) -> (Vec<Action>, bool) {
         let mut actions = Vec::new();
         let id = self.panes[i].id;
+        let dragging = self.drag.is_some_and(|d| d.active);
         if let PaneKind::Chart(c) = &mut self.panes[i].kind {
+            c.hover_enabled = !dragging;
             let clicked = c.show(ui, rect, focused, &self.worker);
             actions.append(&mut c.actions);
             return (actions, clicked);
@@ -50,7 +52,6 @@ impl TerminalApp {
                     self.worker.send(Request::MarkAlertsSeen);
                 }
             }
-            PaneKind::Help => help(ui, &self.prefs.hotkeys),
             PaneKind::Wei => actions.extend(markets_view::wei(ui, &self.quotes, self.wei_updated.as_deref())),
             PaneKind::Curve => actions.extend(markets_view::curve(ui, self.curves.as_deref())),
             PaneKind::Search { query } => {
@@ -73,10 +74,11 @@ impl TerminalApp {
                     actions.push(a);
                 }
             }
-            PaneKind::Watchlist | PaneKind::Settings | PaneKind::Chart(_) => {}
+            PaneKind::Watchlist | PaneKind::Settings | PaneKind::Help | PaneKind::Chart(_) => {}
         }
         match self.panes[i].kind {
             PaneKind::Watchlist => actions.extend(self.watchlist(ui)),
+            PaneKind::Help => self.help_panel(ui),
             PaneKind::Settings => {
                 let cmds = self.settings_panel(ui);
                 self.run_settings_cmds(cmds);
@@ -386,70 +388,6 @@ fn order_book(ui: &mut Ui, b: &mut super::BookPane) -> Option<Action> {
     ui.allocate_rect(rect, Sense::hover());
     ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
     action
-}
-
-/// Help text, with hotkeys taken from the current keymap.
-fn help(ui: &mut Ui, keys: &crate::prefs::Keymap) {
-    use crate::prefs::Action as A;
-    let k = |a: A| keys.chord(a).map(|c| c.display()).unwrap_or_else(|| "—".into());
-    let text_body = format!(
-        "\
-COMMAND LINE  <SECURITY> [<FUNCTION>] <GO>   (Enter = <GO>; type anywhere to start)
-  Market keys: AAPL <EQUITY> · SPX <INDEX> · BTCUSD <CRNCY> · EURUSD <CRNCY> · US10Y <GOVT> · CL1 <CMDTY>
-  Typing shows matches across all asset classes: Up/Down select, Tab complete, Enter load.
-  WEI world markets · GC yield curve · SECF <query> search · N / CN news · OB order book (crypto: live)
-  1 5 15 30 1H 4H D 1W 1M  interval · 1D 5D 3M 6M YTD 1Y 5Y ALL  range · CANDLE BAR LINE AREA · LOG
-  SMA 20 · EMA 50 · VWAP · BB 20 2 · RSI 14 · MACD 12 26 9 (CLEAR) · CMP MSFT compare · TL HL VL FIB · MAGNET
-
-WORKSPACE (free-form docking)
-  Drag a tab onto another pane: centre adds a tab, edges split; drag to a window edge to dock there.
-  Drag dividers to resize (double-click to equalise). Right-click a tab or use ⋯ for split, link, rename, pop out.
-  NEW <PANEL> [KEY]   add beside the focused pane (CHART NEWS BOOK WEI GC CONG POL ALRT WL SECF PREFS HELP)
-  SPLIT [DOWN] [PANEL] · POP (pop out; close the window to dock back) · CLOSE · TITLE <text>
-  LINK RED|ORANGE|GREEN|BLUE|PURPLE|OFF   panes in a colour group follow one security
-  LAYOUT 1|2|2H|3|4|6 preset grid · LAYOUT <name> switch · LAYOUT SAVE [name] · LAYOUT NEW <name>
-  LAYOUT RENAME <new> · LAYOUT DUP [name] · LAYOUT DEL [name] · LAYOUT EXPORT [path] · LAYOUT IMPORT <path>
-  Layouts autosave and the last one is restored on launch. PREFS: theme, colours, fonts, density, hotkeys.
-
-CONGRESS (STOCK Act PTRs from Senate eFD + House Clerk, refreshed hourly)
-  CONG feed · NVDA CONG who traded it · POL / POL PELOSI · TRACK / UNTRACK PELOSI · ALERTS · REFRESH
-
-HOTKEYS (rebind in PREFS › Hotkeys)
-  {} help · {} Congress · {} politicians · {} alerts · {} watchlist · {} refresh · {} frame timing
-  {} / {} next / previous pane · {} sidebar · {} split right · {} split down · {} new tab · {} close
-  {} pop out · {} save layout · {} settings · {}…{} switch to saved layouts 1–9
-  Chart: {} trendline · {} horizontal · {} vertical · {} fib · {} reset · {} log · {} magnet
-         wheel zoom · drag pan · drag axes stretch · double-click reset · arrows pan · +/- zoom · Esc · Del",
-        k(A::Help),
-        k(A::Congress),
-        k(A::Politicians),
-        k(A::Alerts),
-        k(A::Watchlist),
-        k(A::Refresh),
-        k(A::FrameTiming),
-        k(A::NextPane),
-        k(A::PrevPane),
-        k(A::ToggleSidebar),
-        k(A::SplitRight),
-        k(A::SplitDown),
-        k(A::NewTab),
-        k(A::ClosePane),
-        k(A::PopOut),
-        k(A::SaveLayout),
-        k(A::Settings),
-        k(A::Layout1),
-        k(A::Layout9),
-        k(A::DrawTrendline),
-        k(A::DrawHorizontal),
-        k(A::DrawVertical),
-        k(A::DrawFib),
-        k(A::ResetView),
-        k(A::LogScale),
-        k(A::Magnet),
-    );
-    egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-        ui.label(RichText::new(text_body).font(mono(12.0)).color(text()));
-    });
 }
 
 #[cfg(test)]
