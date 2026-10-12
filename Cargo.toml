@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/congress", "crates/data", "crates/chart", "app"]
+default-members = ["app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+
+[workspace.dependencies]
+tr-core = { path = "crates/core" }
+tr-congress = { path = "crates/congress" }
+tr-data = { path = "crates/data" }
+tr-chart = { path = "crates/chart" }
+anyhow = "1"
+thiserror = "2"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "cookies", "json", "gzip"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+criterion = "0.8"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+debug = 1
+
+[profile.dev.package."*"]
+opt-level = 2
