@@ -86,8 +86,11 @@ impl Viewport {
         self.width_px = width_px.max(1.0);
     }
 
-    /// Keep at least a few bars on screen and limit the empty space on either side.
+    /// Keep at least a few bars on screen, never zoom out past the whole series (with a
+    /// margin), and limit the empty space on either side.
     pub fn clamp(&mut self, len: usize) {
+        let min_px = self.width_px / (len.max(10) as f64 * 1.15);
+        self.bar_px = self.bar_px.clamp(min_px.min(MAX_BAR_PX), MAX_BAR_PX);
         let vis = self.visible_bars();
         let min_right = (len as f64).min(5.0);
         let max_right = len as f64 + vis * 0.8;
@@ -205,6 +208,10 @@ mod tests {
         v.pan_px(1e9);
         v.clamp(1000);
         assert!(close(v.right, 5.0));
+        // Zooming out stops once the whole series fits.
+        v.zoom(1e-6, 500.0);
+        v.clamp(1000);
+        assert!(v.visible_bars() <= 1150.0 + 1e-6);
     }
 
     #[test]

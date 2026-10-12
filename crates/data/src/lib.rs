@@ -91,8 +91,9 @@ impl<P: MarketData> MarketData for Fallback<P> {
 
     async fn history(&self, symbol: &str, tf: Timeframe, end: Option<i64>, limit: usize) -> Result<Vec<Bar>> {
         match self.primary.history(symbol, tf, end, limit).await {
-            Ok(b) if !b.is_empty() => Ok(b),
-            Ok(_) => Ok(Vec::new()),
+            Ok(b) => Ok(b),
+            // Paging older history: never splice sample bars onto real ones.
+            Err(e) if end.is_some() => Err(e),
             Err(e) => {
                 tracing::warn!("{} history {symbol} {tf} failed, using sample data: {e:#}", self.name);
                 self.sample.history(symbol, tf, end, limit).await
@@ -164,6 +165,8 @@ mod tests {
         assert_eq!(bars.len(), 100);
         let q = p.quotes(&["AAPL".into()]).await.unwrap();
         assert_eq!(q.len(), 1);
+        // Paging must surface the error instead of mixing in synthetic bars.
+        assert!(p.history("AAPL", Timeframe::D1, Some(bars[0].ts), 100).await.is_err());
         assert_eq!(p.name(), "broken");
     }
 

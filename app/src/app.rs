@@ -115,6 +115,11 @@ pub struct TerminalApp {
     last_feed: Option<Instant>,
     last_save: Instant,
     started: Instant,
+    /// Frame-time readout (F12): smoothed CPU time of `ui()` and interval between frames.
+    show_perf: bool,
+    perf_cpu_ms: f64,
+    perf_dt_ms: f64,
+    last_frame: Option<Instant>,
 }
 
 fn settings_path() -> std::path::PathBuf {
@@ -154,6 +159,10 @@ impl TerminalApp {
             last_feed: None,
             last_save: Instant::now(),
             started: Instant::now(),
+            show_perf: std::env::var_os("TR_FPS").is_some(),
+            perf_cpu_ms: 0.0,
+            perf_dt_ms: 0.0,
+            last_frame: None,
         };
         match settings {
             Some(s) => {
@@ -473,10 +482,14 @@ impl TerminalApp {
                     }
                 }
                 Response::HistoryError { pane, generation, error } => {
-                    if let Some(c) = self.chart_mut(pane) {
+                    // Errors while paging just mean "no older history"; only report failed loads.
+                    let empty = self.chart_mut(pane).map(|c| {
                         c.on_history_error(generation, error.clone());
+                        c.is_empty()
+                    });
+                    if empty == Some(true) {
+                        self.status = format!("data error: {error}");
                     }
-                    self.status = format!("data error: {error}");
                 }
                 Response::Indicators { pane, generation, built } => {
                     if let Some(c) = self.chart_mut(pane) {
@@ -611,6 +624,9 @@ impl TerminalApp {
             if pressed(Modifiers::NONE, k) {
                 self.apply(f);
             }
+        }
+        if pressed(Modifiers::NONE, Key::F12) {
+            self.show_perf = !self.show_perf;
         }
         let is_chart = matches!(self.panes[self.focus].kind, PaneKind::Chart(_));
         if !is_chart {
@@ -788,7 +804,12 @@ impl TerminalApp {
             p.galley(pos2(x, rect.center().y - g.size().y / 2.0), g.clone(), TEXT);
             x += g.size().x + 10.0;
         }
-        p.text(pos2(rect.right() - 6.0, rect.center().y), Align2::RIGHT_CENTER, &self.status, mono(11.0), AMBER);
+        let status = if self.show_perf {
+            format!("UI {:.2} ms  frame {:.1} ms ({:.0} fps)   {}", self.perf_cpu_ms, self.perf_dt_ms, 1000.0 / self.perf_dt_ms.max(0.1), self.status)
+        } else {
+            self.status.clone()
+        };
+        p.text(pos2(rect.right() - 6.0, rect.center().y), Align2::RIGHT_CENTER, status, mono(11.0), AMBER);
     }
 
     fn pane_frame(ui: &Ui, rect: Rect, title: &str, focused: bool) -> Rect {
@@ -877,6 +898,7 @@ CHART HOTKEYS (focused chart)
   wheel zoom · drag pan · drag price axis stretch · drag time axis zoom · double-click reset
   ←/→ pan · Ctrl/Cmd+↑/↓ or +/- zoom · Alt+R reset · Alt+L log · Alt+M magnet
   Alt+T trendline · Alt+H horizontal · Alt+V vertical · Alt+F fib · Esc cancel · Del remove
+  F12 frame-time readout (UI CPU ms, frame interval, fps)
 
 DATA  APCA_API_KEY_ID/APCA_API_SECRET_KEY -> Alpaca; otherwise Yahoo; TR_PROVIDER=sample offline.";
         egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
@@ -918,6 +940,11 @@ DATA  APCA_API_KEY_ID/APCA_API_SECRET_KEY -> Alpaca; otherwise Yahoo; TR_PROVIDE
 
 impl eframe::App for TerminalApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        let frame_start = Instant::now();
+        if let Some(prev) = self.last_frame.replace(frame_start) {
+            let dt = prev.elapsed().as_secs_f64() * 1e3;
+            self.perf_dt_ms = if self.perf_dt_ms == 0.0 { dt } else { self.perf_dt_ms * 0.9 + dt * 0.1 };
+        }
         let ctx = ui.ctx().clone();
         self.drain();
         self.periodic();
@@ -1005,6 +1032,12 @@ impl eframe::App for TerminalApp {
         self.run_actions(actions);
         self.toasts(&ctx);
 
+        let cpu = frame_start.elapsed().as_secs_f64() * 1e3;
+        self.perf_cpu_ms = self.perf_cpu_ms * 0.9 + cpu * 0.1;
+        if self.show_perf {
+            // Measure continuously while the readout is visible.
+            ctx.request_repaint();
+        }
         // Keep the clock ticking and pick up worker results without spinning.
         ctx.request_repaint_after(Duration::from_millis(500));
         if self.started.elapsed() < Duration::from_secs(2) {

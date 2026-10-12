@@ -93,6 +93,10 @@ impl ChartState {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.bars.is_empty()
+    }
+
     /// (Re)load history for the current symbol and timeframe.
     pub fn load(&mut self, w: &Worker) {
         self.generation += 1;
@@ -629,8 +633,13 @@ impl ChartState {
         // ---- axes ----
         let axis_painter = ui.painter_at(Rect::from_min_max(pos2(plot_all.right(), body.top()), body.max));
         axis_painter.vline(plot_all.right(), body.y_range(), Stroke::new(1.0, theme::BORDER));
+        let positive_prices = self.bars.last().is_some_and(|b| b.low > 0.0);
         for t in &ticks {
             let y = price_rect.top() + scale.y_of(*t) as f32;
+            // The volume headroom can dip below zero; don't label impossible prices.
+            if positive_prices && *t < 0.0 {
+                continue;
+            }
             if y > price_rect.top() + 6.0 && y < price_rect.bottom() - 6.0 {
                 axis_painter.text(
                     pos2(plot_all.right() + 6.0, y),
