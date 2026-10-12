@@ -122,6 +122,11 @@ Measured on Linux with Mesa **llvmpipe (a CPU software rasterizer)** — a real 
   All within the 8.33 ms budget for 120 fps even on the software rasterizer. Criterion versions:
   `cargo bench -p tr-chart --bench frame`.
 - **In the app** (F12 readout, interactive wheel-zoom + drag): UI CPU ≈ 0.2 ms per frame, 118 fps.
+  To try a million bars interactively:
+  `TR_PROVIDER=sample TR_SAMPLE_BARS=1000000 TR_HISTORY_LIMIT=1000000 TR_FPS=1 cargo run --release`, then `1 <GO>`.
+  With all 1M one-minute bars visible on llvmpipe under Xvfb the app measured UI CPU 0.36 ms and
+  76 fps for the whole window (software rasterization and presentation bound; the chart pass itself
+  is the benchmark above).
 - **Indicators over 1M bars** (`cargo bench -p tr-core`): SMA 1.8 ms, EMA 2.2 ms, VWAP 7.0 ms,
   Bollinger 29 ms; RSI and MACD are single-pass (≈ 12 ms and 26 ms including first-touch of their
   output memory).

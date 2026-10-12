@@ -329,8 +329,9 @@ fn default_limit(tf: Timeframe) -> usize {
     }
 }
 
+/// Bars requested on first load; `TR_HISTORY_LIMIT` overrides (e.g. 1000000 with sample data).
 pub fn initial_limit(tf: Timeframe) -> usize {
-    default_limit(tf)
+    std::env::var("TR_HISTORY_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or_else(|| default_limit(tf))
 }
 
 async fn handle(s: &Shared, req: Request) {

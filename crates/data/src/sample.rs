@@ -14,8 +14,10 @@ pub struct SampleProvider {
 }
 
 impl Default for SampleProvider {
+    /// History depth defaults to 20,000 bars; `TR_SAMPLE_BARS` raises it (e.g. 1000000).
     fn default() -> Self {
-        Self { now: chrono::Utc::now().timestamp(), depth: 20_000 }
+        let depth = std::env::var("TR_SAMPLE_BARS").ok().and_then(|v| v.parse().ok()).unwrap_or(20_000);
+        Self { now: chrono::Utc::now().timestamp(), depth }
     }
 }
 
