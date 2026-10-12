@@ -50,10 +50,10 @@ fn row(ui: &mut Ui, l: &Listing, quotes: &HashMap<String, Quote>, out: &mut Vec<
     let sec = l.security();
     let key = l.key();
     let q = quotes.get(&key);
-    let (h, w_name) = (16.0, (width - 380.0).max(60.0));
+    let h = theme::dp(16.0);
     let (rect, resp) = ui.allocate_exact_size(vec2(width, h), Sense::click());
     if resp.hovered() {
-        ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(28, 22, 4));
+        ui.painter().rect_filled(rect, 3.0, theme::control());
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     if resp.clicked() {
@@ -61,29 +61,38 @@ fn row(ui: &mut Ui, l: &Listing, quotes: &HashMap<String, Quote>, out: &mut Vec<
     }
     let p = ui.painter_at(rect);
     let y = rect.center().y;
-    let mut x = rect.left() + 2.0;
+    let x = rect.left() + 2.0;
     p.text(pos2(x, y), Align2::LEFT_CENTER, l.ticker, mono(12.0), amber());
-    x += 70.0;
-    let name: String = l.name.chars().take((w_name / 7.0) as usize).collect();
-    p.text(pos2(x, y), Align2::LEFT_CENTER, name, mono(11.5), muted());
     let right = rect.right() - 2.0;
+    // Narrow columns drop the net change, then the sparkline, then the name.
+    let compact = width < 330.0;
+    let last_right = if compact { right - 66.0 } else { right - 150.0 };
+    let mut name_right = last_right - 92.0;
     match q {
         Some(q) => {
             let c = if q.change() >= 0.0 { theme::up() } else { theme::down() };
             let d = sec.decimals(q.last);
-            let pct = if sec.class == AssetClass::Govt { String::new() } else { format!("{:+.2}%", q.change_pct()) };
+            let pct =
+                if sec.class == AssetClass::Govt { change_text(&sec, q) } else { format!("{:+.2}%", q.change_pct()) };
             p.text(pos2(right, y), Align2::RIGHT_CENTER, pct, mono(12.0), c);
-            p.text(pos2(right - 66.0, y), Align2::RIGHT_CENTER, change_text(&sec, q), mono(12.0), c);
-            p.text(pos2(right - 150.0, y), Align2::RIGHT_CENTER, format!("{:.d$}", q.last), mono(12.0), text());
-            // Sparkline sits left of the price columns (last price is up to ~10 chars wide).
-            let spark = Rect::from_min_size(pos2(right - 296.0, rect.top() + 3.0), vec2(48.0, h - 6.0));
-            if spark.left() > rect.left() + 150.0 {
+            if !compact {
+                p.text(pos2(right - 66.0, y), Align2::RIGHT_CENTER, change_text(&sec, q), mono(12.0), c);
+            }
+            p.text(pos2(last_right, y), Align2::RIGHT_CENTER, format!("{:.d$}", q.last), mono(12.0), text());
+            let spark = Rect::from_min_size(pos2(name_right - 52.0, rect.top() + 3.0), vec2(48.0, h - 6.0));
+            if spark.left() > rect.left() + 180.0 {
                 sparkline(ui, spark, &q.spark, c);
+                name_right = spark.left() - 6.0;
             }
         }
         None => {
             p.text(pos2(right, y), Align2::RIGHT_CENTER, "…", mono(12.0), muted());
         }
+    }
+    let name_left = x + 70.0;
+    if name_right - name_left > 36.0 {
+        let clip = Rect::from_min_max(pos2(name_left, rect.top()), pos2(name_right, rect.bottom()));
+        p.with_clip_rect(clip).text(pos2(name_left, y), Align2::LEFT_CENTER, l.name, ui_font(11.5), muted());
     }
 }
 
@@ -91,9 +100,9 @@ fn row(ui: &mut Ui, l: &Listing, quotes: &HashMap<String, Quote>, out: &mut Vec<
 pub fn wei(ui: &mut Ui, quotes: &HashMap<String, Quote>, updated: Option<&str>) -> Vec<Action> {
     let mut out = Vec::new();
     let width = ui.available_width();
-    let cols = ((width / 430.0).floor() as usize).clamp(1, 3);
+    let cols = ((width / 460.0).floor() as usize).clamp(1, 3);
     let col_w = (width - 8.0 * (cols - 1) as f32) / cols as f32;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new("WORLD MARKETS").font(mono(12.5)).color(amber()));
         ui.label(RichText::new(updated.unwrap_or("loading quotes…")).font(mono(11.0)).color(muted()));
         ui.label(RichText::new("click a row to chart it").font(mono(11.0)).color(muted()));

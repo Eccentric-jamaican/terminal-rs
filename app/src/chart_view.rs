@@ -398,13 +398,14 @@ impl ChartState {
     /// Draw the pane into `rect`. Returns true if the pane was clicked (focus request).
     pub fn show(&mut self, ui: &mut Ui, rect: Rect, focused: bool, w: &Worker) -> bool {
         let painter = ui.painter_at(rect);
+        // Sits under a tab strip inside a card: square top, rounded bottom.
         let r = theme::CARD_RADIUS.saturating_sub(1);
-        painter.rect_filled(rect, r, theme::card());
+        painter.rect_filled(rect, CornerRadius { nw: 0, ne: 0, sw: r, se: r }, theme::card());
         let mut clicked = false;
 
         // Header: ticker, yellow key and name, then segmented interval and type controls.
         let header = Rect::from_min_size(rect.min, vec2(rect.width(), HEADER_H));
-        painter.rect_filled(header, CornerRadius { nw: r, ne: r, sw: 0, se: 0 }, theme::header());
+        painter.rect_filled(header, 0.0, theme::card());
         painter.hline(header.x_range(), header.bottom(), Stroke::new(1.0, theme::border()));
         let mut hui = ui.new_child(
             UiBuilder::new()

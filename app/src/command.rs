@@ -146,8 +146,30 @@ pub enum Function {
     Watchlist,
     WatchAdd(Vec<String>),
     WatchRemove(Vec<String>),
+    /// `LAYOUT 1|2|2H|3|4|6` preset, `LAYOUT <name>` switch, or a layout subcommand
+    /// (`SAVE`, `SAVEAS`, `NEW`, `RENAME`, `DUP`, `DEL`, `EXPORT`, `IMPORT`).
     Layout(String),
-    NewPane,
+    /// List saved layouts.
+    Layouts,
+    /// Add a panel (`NEW NEWS`, `NEW BOOK BTCUSD`); empty adds a chart.
+    NewPanel(String),
+    /// Split the focused pane, adding a panel to the right (or below).
+    Split {
+        down: bool,
+        panel: String,
+    },
+    PopOut,
+    /// Put the focused pane in a colour link group (`None` = unlink).
+    Link(Option<crate::layouts::Link>),
+    /// Headlines (for a security when used after one).
+    News,
+    /// Order book depth (levels).
+    OrderBook(Option<usize>),
+    Settings,
+    /// `THEME LIGHT|DARK|SYSTEM|COMPACT|REGULAR|COMFORTABLE`.
+    Theme(String),
+    /// Rename the focused tab (empty resets).
+    Title(String),
     ClosePane,
     Help,
     /// World equity indices / markets overview.
@@ -206,10 +228,26 @@ fn parse_function(head: &str, rest: &[&str]) -> Option<Function> {
             Some("DEL") | Some("RM") | Some("REMOVE") => Function::WatchRemove(words()[1..].to_vec()),
             _ => Function::Watchlist,
         },
-        "LAYOUT" | "GRID" => {
-            Function::Layout(rest.first().map(|s| s.to_ascii_uppercase()).unwrap_or_else(|| "1".into()))
+        "LAYOUT" | "GRID" | "LP" => Function::Layout(joined()),
+        "LAYOUTS" => Function::Layouts,
+        "NEW" | "ADD" => Function::NewPanel(joined()),
+        "SPLIT" | "SPLITV" | "SPLITH" => {
+            let w = words();
+            let down = up == "SPLITH" || matches!(w.first().map(String::as_str), Some("DOWN" | "H" | "BELOW"));
+            let skip =
+                usize::from(matches!(w.first().map(String::as_str), Some("DOWN" | "H" | "BELOW" | "RIGHT" | "V")));
+            Function::Split { down, panel: rest[skip.min(rest.len())..].join(" ") }
         }
-        "NEW" => Function::NewPane,
+        "POP" | "POPOUT" | "UNDOCK" => Function::PopOut,
+        "LINK" => Function::Link(match words().first().map(String::as_str) {
+            None | Some("OFF" | "NONE" | "0") => None,
+            Some(c) => Some(crate::layouts::Link::ALL.into_iter().find(|l| l.label().eq_ignore_ascii_case(c))?),
+        }),
+        "N" | "CN" | "NEWS" | "TOP" => Function::News,
+        "OB" | "BOOK" | "DEPTH" | "DOM" => Function::OrderBook(num(rest.first())),
+        "PREFS" | "SETTINGS" | "PDF" | "CONFIG" => Function::Settings,
+        "THEME" => Function::Theme(words().join(" ")),
+        "TITLE" | "RENAME" => Function::Title(joined()),
         "CLOSE" => Function::ClosePane,
         "HELP" | "?" | "H" => Function::Help,
         "WEI" | "MARKETS" | "WORLD" => Function::Wei,
@@ -296,8 +334,26 @@ fn describe(f: &Function) -> String {
         Function::Watchlist => "Watchlist".into(),
         Function::WatchAdd(s) => format!("Add {} to watchlist", s.join(", ")),
         Function::WatchRemove(s) => format!("Remove {} from watchlist", s.join(", ")),
+        Function::Layout(l) if l.trim().is_empty() => "Saved layouts".into(),
         Function::Layout(l) => format!("Layout {l}"),
-        Function::NewPane => "Split: add a pane".into(),
+        Function::Layouts => "Saved layouts".into(),
+        Function::NewPanel(p) if p.trim().is_empty() => "Add a chart pane".into(),
+        Function::NewPanel(p) => format!("Add panel: {p}"),
+        Function::Split { down, panel } => {
+            format!(
+                "Split {} with {}",
+                if *down { "down" } else { "right" },
+                if panel.is_empty() { "a chart" } else { panel }
+            )
+        }
+        Function::PopOut => "Pop the focused pane out into its own window".into(),
+        Function::Link(Some(l)) => format!("Link focused pane to the {} group", l.label()),
+        Function::Link(None) => "Unlink focused pane".into(),
+        Function::News => "News headlines".into(),
+        Function::OrderBook(_) => "Order book (depth)".into(),
+        Function::Settings => "Settings: theme, fonts, density, hotkeys, panels, layouts".into(),
+        Function::Theme(t) => format!("Theme {t}"),
+        Function::Title(t) => format!("Rename tab to {t:?}"),
         Function::ClosePane => "Close focused pane".into(),
         Function::Help => "Help".into(),
         Function::Wei => "World markets overview".into(),
@@ -357,6 +413,25 @@ mod tests {
             Some(Command::Function(Function::WatchAdd(vec!["MSFT".into(), "NVDA".into()])))
         );
         assert_eq!(parse("LAYOUT 4"), Some(Command::Function(Function::Layout("4".into()))));
+        assert_eq!(
+            parse("LAYOUT save Morning Desk"),
+            Some(Command::Function(Function::Layout("save Morning Desk".into())))
+        );
+        assert_eq!(parse("NEW BOOK"), Some(Command::Function(Function::NewPanel("BOOK".into()))));
+        assert_eq!(
+            parse("SPLIT DOWN NEWS"),
+            Some(Command::Function(Function::Split { down: true, panel: "NEWS".into() }))
+        );
+        assert_eq!(parse("SPLIT"), Some(Command::Function(Function::Split { down: false, panel: String::new() })));
+        assert_eq!(parse("LINK BLUE"), Some(Command::Function(Function::Link(Some(crate::layouts::Link::Blue)))));
+        assert_eq!(parse("LINK OFF"), Some(Command::Function(Function::Link(None))));
+        assert_eq!(parse("LINK PINK"), None);
+        assert_eq!(parse("AAPL CN"), Some(Command::SymbolFunction("AAPL US Equity".into(), Function::News)));
+        assert_eq!(
+            parse("BTCUSD CRNCY OB 50"),
+            Some(Command::SymbolFunction("BTCUSD Curncy".into(), Function::OrderBook(Some(50))))
+        );
+        assert_eq!(parse("PREFS"), Some(Command::Function(Function::Settings)));
     }
 
     #[test]

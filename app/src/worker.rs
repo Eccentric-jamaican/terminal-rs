@@ -24,6 +24,16 @@ use crate::theme;
 pub type PaneId = u64;
 
 pub enum Request {
+    /// Headlines for a market key (`None` = general market news).
+    News {
+        pane: PaneId,
+        symbol: Option<String>,
+    },
+    OrderBook {
+        pane: PaneId,
+        symbol: String,
+        depth: usize,
+    },
     History {
         pane: PaneId,
         generation: u64,
@@ -100,6 +110,16 @@ pub struct Profile {
 }
 
 pub enum Response {
+    News {
+        pane: PaneId,
+        symbol: Option<String>,
+        items: Result<Vec<tr_data::NewsItem>, String>,
+    },
+    OrderBook {
+        pane: PaneId,
+        symbol: String,
+        book: Result<tr_data::OrderBook, String>,
+    },
     History {
         pane: PaneId,
         generation: u64,
@@ -534,6 +554,14 @@ async fn handle(s: &Arc<Shared>, req: Request) {
             Ok(c) => s.send(Response::Curves(Box::new(c))),
             Err(e) => s.send(Response::Status(format!("yield curve: {e:#}"))),
         },
+        Request::News { pane, symbol } => {
+            let items = s.provider.news(symbol.as_deref()).await.map_err(|e| format!("{e:#}"));
+            s.send(Response::News { pane, symbol, items });
+        }
+        Request::OrderBook { pane, symbol, depth } => {
+            let book = s.provider.order_book(&symbol, depth).await.map_err(|e| format!("{e:#}"));
+            s.send(Response::OrderBook { pane, symbol, book });
+        }
         Request::Search(query) => {
             let hits = s.provider.search(&query).await.unwrap_or_default();
             s.send(Response::SearchHits { query, hits });

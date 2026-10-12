@@ -77,6 +77,26 @@ systems**.
   - **Alerts**: `TRACK <name>` (or ☆ in the directory/profile); when a tracked politician files a
     new PTR you get a toast, an `ALERTS n` badge and an entry in `ALERTS`.
 
+- **Fully customizable workspace**
+  - Free-form docking of any panel (chart, watchlist, news, order book, world markets, yield
+    curve, Congress feed, politicians, alerts, search, settings, help): drag a tab onto a pane's
+    centre to tab it or onto an edge to split, drag to a window edge to dock there, resize with
+    dividers (double-click to equalise), tabs in every pane, and pop any pane out into its own
+    native window (close it to dock back). Add panels from each pane's **+** menu or with
+    `NEW <PANEL>` / `SPLIT [DOWN] <PANEL>`.
+  - **Link groups**: give panes a colour (`LINK BLUE`, or the tab menu) and one security change
+    drives every linked chart, order book, news and per-ticker Congress pane; clicking a row in a
+    linked watchlist or world-markets pane loads it into the group.
+  - **Saved layouts**: save, name, rename, duplicate, delete and switch (`LAYOUT <name>`, the
+    sidebar list, ⌘1…⌘9); the active layout autosaves and is restored on launch. Each layout is
+    a JSON file in `~/Library/Application Support/terminal-rs/layouts` (`$XDG_DATA_HOME` on
+    Linux) and can be imported or exported (`LAYOUT EXPORT`/`IMPORT`, or Settings › Layouts).
+  - **Preferences** (`PREFS`, persisted in `prefs.json`): light/dark/system theme, accent, up/down
+    and highlight colours, interface and number fonts, text size and density (compact, regular,
+    comfortable); every hotkey is rebindable; defaults for new charts and order books. Per-pane
+    settings (chart type, indicators, drawings, filters, depth, link, tab title) save with the layout.
+  - **News** (Yahoo headlines; CoinDesk for crypto) and **order book** depth (live Binance book,
+    Coinbase fallback; markets without a free public book show a clearly marked simulation).
 - **Native macOS feel** while keeping Bloomberg density and the command line: transparent title
   bar with the traffic lights inset in a unified toolbar, a translucent source-list sidebar with
   window vibrancy (`NSVisualEffectView` via `objc2`, in `crates/macos`) for the watchlist,
@@ -102,7 +122,7 @@ current and previous year (a few minutes; it runs in the background while you wo
 
 Appearance: `TR_THEME=light|dark` overrides the system appearance, `TR_MSAA=1|2|4|8` sets
 chart anti-aliasing (default 4 on macOS), `TR_VIBRANCY=0` disables the translucent sidebar, and
-⌃⌘S (Ctrl+S elsewhere) toggles the sidebar. `scripts/bundle-macos.sh` builds a retina-capable
+⌃⌘S (Ctrl+Shift+S elsewhere) toggles the sidebar. `scripts/bundle-macos.sh` builds a retina-capable
 `terminal-rs.app`.
 
 Press **F1** (or type `HELP`) for the full command and hotkey list. Highlights:
@@ -119,12 +139,19 @@ Press **F1** (or type `HELP`) for the full command and hotkey list. Highlights:
 | wheel / drag / drag axes / double-click | zoom / pan / stretch / reset |
 | Alt+T/H/V/F · Alt+R · Alt+L · Esc · Del | draw · reset view · log · cancel · delete drawing |
 | F1–F6 · Tab · F12 | help, CONG, POL, ALRT, WL, SYNC · next pane · frame-time readout |
+| `NEW BOOK` · `SPLIT DOWN NEWS` · `POP` · `LINK GREEN` · `TITLE Desk` | add, split, pop out, link, rename panes |
+| `LAYOUT SAVE Macro` · `LAYOUT Macro` · `LAYOUT RENAME Rates` · `LAYOUT DUP` · `LAYOUT DEL` · `LAYOUT EXPORT` | saved layouts |
+| `AAPL CN` · `BTCUSD CRNCY OB` · `PREFS` · `THEME LIGHT COMPACT` | news · order book · settings · theme |
 | right-click chart / watchlist / feed row | context menu (chart type, indicators, draw, add to watchlist, who traded it) |
 
 ## Architecture
 
 ```
-app/            eframe shell: command line, tiling panes, chart widget, congress panels
+app/            eframe shell: command line, docked panes, chart widget, panels
+  dock.rs       docking tree (splits + tab groups): insert/move/remove, layout, resize, presets
+  layouts.rs    saved layout documents (JSON) and the layouts folder store
+  prefs.rs      appearance, keymap and panel defaults (prefs.json)
+  app/          workspace (drag and drop, pop-out windows, link groups), panels, settings, chrome
   worker.rs     tokio runtime: all network, SQLite, pyramid and indicator work (UI never blocks)
 crates/core     Bar/Series, timeframes, market keys + security catalog, indicators, sample data
 crates/data     MarketData trait; per-class router (Binance/Coinbase, Treasury.gov/FRED, Yahoo,
@@ -194,6 +221,11 @@ cargo bench -p tr-core && cargo bench -p tr-chart
   tested; opt-in live tests hit the real sources for every asset class.
 - Indicators are checked against reference values (Wilder's RSI example, hand-computed EMA, MACD,
   population-SD Bollinger, session VWAP).
+- Layouts: the dock tree (insert, split, tab, move, remove/normalise, resize clamping, presets,
+  JSON round trip and repair of hand-edited files), layout documents (every panel kind and its
+  settings, links, popped windows, older formats), the store (save, list, rename, duplicate,
+  delete, import, export, safe file names), migration from pre-docking settings, prefs and
+  keymap parsing/rebinding.
 - The chart renders real frames offscreen on whatever adapter is present and checks pixels.
 
 ## Platform notes and limitations

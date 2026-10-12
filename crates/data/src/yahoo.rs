@@ -197,6 +197,48 @@ impl MarketData for YahooProvider {
     }
 }
 
+impl YahooProvider {
+    /// Headlines related to a Yahoo symbol or free-text query.
+    pub async fn news(&self, query: &str) -> Result<Vec<crate::NewsItem>> {
+        let resp = self
+            .client
+            .get(SEARCH)
+            .query(&[("q", query), ("quotesCount", "0"), ("newsCount", "25"), ("listsCount", "0")])
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            bail!("yahoo news: HTTP {}", resp.status());
+        }
+        parse_news(&resp.text().await?)
+    }
+}
+
+/// Parse the `news` array of `/v1/finance/search`, newest first.
+pub fn parse_news(json: &str) -> Result<Vec<crate::NewsItem>> {
+    let v: serde_json::Value = serde_json::from_str(json).context("parsing Yahoo news")?;
+    let mut out: Vec<crate::NewsItem> = v["news"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|n| {
+                    Some(crate::NewsItem {
+                        title: n["title"].as_str()?.trim().to_string(),
+                        publisher: n["publisher"].as_str().unwrap_or("").to_string(),
+                        link: n["link"].as_str()?.to_string(),
+                        ts: n["providerPublishTime"].as_i64().unwrap_or_default(),
+                        tickers: n["relatedTickers"]
+                            .as_array()
+                            .map(|t| t.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                            .unwrap_or_default(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort_by_key(|a| std::cmp::Reverse(a.ts));
+    Ok(out)
+}
+
 const SPARK: &str = "https://query1.finance.yahoo.com/v8/finance/spark";
 const SEARCH: &str = "https://query2.finance.yahoo.com/v1/finance/search";
 
@@ -313,6 +355,14 @@ mod tests {
         assert_eq!(parse_chart(json).unwrap().bars.len(), 1);
         let err = r#"{"chart":{"result":null,"error":{"code":"Not Found","description":"No data found"}}}"#;
         assert!(parse_chart(err).is_err());
+    }
+
+    #[test]
+    fn news_fixture() {
+        let n = parse_news(include_str!("../tests/fixtures/yahoo_news.json")).unwrap();
+        assert!(!n.is_empty());
+        assert!(n.windows(2).all(|w| w[0].ts >= w[1].ts));
+        assert!(n.iter().all(|x| !x.title.is_empty() && x.link.starts_with("https://")));
     }
 
     #[test]

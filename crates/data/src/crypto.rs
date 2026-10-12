@@ -139,6 +139,53 @@ fn coinbase_granularity(tf: Timeframe) -> (i64, bool) {
     }
 }
 
+fn parse_levels(v: &serde_json::Value) -> Vec<crate::Level> {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|l| {
+                    let p = l.get(0)?.as_str()?.parse().ok()?;
+                    let q = l.get(1)?.as_str()?.parse().ok()?;
+                    Some((p, q))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Parse a Binance `/api/v3/depth` snapshot.
+pub fn parse_binance_depth(json: &str, symbol: &str) -> Result<crate::OrderBook> {
+    let v: serde_json::Value = serde_json::from_str(json).context("parsing Binance depth")?;
+    if v["bids"].is_null() {
+        bail!("unexpected Binance depth payload");
+    }
+    Ok(crate::OrderBook {
+        symbol: symbol.into(),
+        bids: parse_levels(&v["bids"]),
+        asks: parse_levels(&v["asks"]),
+        source: "Binance".into(),
+        simulated: false,
+    })
+}
+
+/// Parse a Coinbase Exchange level-2 `/book` snapshot (`[price, size, orders]`).
+pub fn parse_coinbase_book(json: &str, symbol: &str, depth: usize) -> Result<crate::OrderBook> {
+    let v: serde_json::Value = serde_json::from_str(json).context("parsing Coinbase book")?;
+    if v["bids"].is_null() {
+        bail!("unexpected Coinbase book payload");
+    }
+    let mut b = crate::OrderBook {
+        symbol: symbol.into(),
+        bids: parse_levels(&v["bids"]),
+        asks: parse_levels(&v["asks"]),
+        source: "Coinbase".into(),
+        simulated: false,
+    };
+    b.bids.truncate(depth);
+    b.asks.truncate(depth);
+    Ok(b)
+}
+
 pub struct CryptoProvider {
     client: reqwest::Client,
 }
@@ -222,6 +269,36 @@ impl CryptoProvider {
             out = tf.resample(&out);
         }
         Ok(crate::clip(out, None, limit))
+    }
+
+    /// Crypto headlines from CoinDesk, narrowed to the asset when it is mentioned.
+    pub async fn news(&self, sec: &Security) -> Result<Vec<crate::NewsItem>> {
+        let items = crate::rss::parse_rss(&self.get(crate::rss::COINDESK, &[]).await?, "CoinDesk")?;
+        let base = sec.ticker.trim_end_matches("USD").trim_end_matches("USDT");
+        let name = sec.name().unwrap_or(base).split(['/', ' ']).next().unwrap_or(base).to_string();
+        Ok(crate::rss::filter_relevant(items, &[base, &name]))
+    }
+
+    /// Order book snapshot: Binance first, Coinbase as fallback.
+    pub async fn order_book(&self, key: &str, sec: &Security, depth: usize) -> Result<crate::OrderBook> {
+        let limit = [5, 10, 20, 50, 100, 500].into_iter().find(|&l| l >= depth).unwrap_or(500);
+        let mut last_err = None;
+        for host in BINANCE_REST {
+            let q = [("symbol", binance_symbol(sec)), ("limit", limit.to_string())];
+            match self.get(&format!("{host}/api/v3/depth"), &q).await.and_then(|j| parse_binance_depth(&j, key)) {
+                Ok(mut b) => {
+                    b.bids.truncate(depth);
+                    b.asks.truncate(depth);
+                    return Ok(b);
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        let product = coinbase_product(sec);
+        match self.get(&format!("{COINBASE_REST}/products/{product}/book"), &[("level", "2".into())]).await {
+            Ok(j) => parse_coinbase_book(&j, key, depth),
+            Err(e) => Err(last_err.unwrap_or(e)),
+        }
     }
 
     pub async fn history(&self, sec: &Security, tf: Timeframe, end: Option<i64>, limit: usize) -> Result<Vec<Bar>> {
@@ -357,6 +434,19 @@ async fn coinbase_ws(product: &str, tf: Timeframe, tx: &mpsc::Sender<Bar>) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn order_book_fixtures() {
+        let b = parse_binance_depth(include_str!("../tests/fixtures/binance_depth.json"), "BTCUSD Curncy").unwrap();
+        assert_eq!((b.bids.len(), b.asks.len()), (5, 5));
+        assert!(b.bids.windows(2).all(|w| w[0].0 > w[1].0));
+        assert!(b.asks.windows(2).all(|w| w[0].0 < w[1].0));
+        assert!(b.spread().unwrap() > 0.0 && !b.simulated);
+        let c = parse_coinbase_book(include_str!("../tests/fixtures/coinbase_book.json"), "BTCUSD Curncy", 3).unwrap();
+        assert_eq!((c.bids.len(), c.asks.len()), (3, 3));
+        assert!(c.bids[0].0 < c.asks[0].0);
+        assert_eq!(c.source, "Coinbase");
+    }
     use tr_core::AssetClass;
 
     const FIX: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");

@@ -7,6 +7,7 @@
 
 use std::cell::Cell;
 
+use crate::prefs::{Appearance, MonoFont, ThemeMode, UiFont};
 use egui::{Color32, FontData, FontDefinitions, FontFamily, FontId, Shadow, Stroke, TextStyle, Theme, Visuals};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -103,11 +104,43 @@ impl Palette {
     }
 }
 
+impl Palette {
+    /// Apply the user's colour overrides.
+    pub fn customized(mut self, a: &Appearance) -> Self {
+        let rgb = |c: [u8; 3]| Color32::from_rgb(c[0], c[1], c[2]);
+        if let Some(c) = a.up {
+            self.up = rgb(c);
+        }
+        if let Some(c) = a.down {
+            self.down = rgb(c);
+        }
+        if let Some(c) = a.highlight {
+            self.amber = rgb(c);
+            self.amber_dim = rgb(c.map(|x| (x as f32 * 0.66) as u8));
+        }
+        self
+    }
+}
+
 /// macOS default (blue) accent, used when the system does not report one.
 pub const DEFAULT_ACCENT: Color32 = Color32::from_rgb(10, 132, 255);
 
 thread_local! {
     static CURRENT: Cell<Palette> = Cell::new(Palette::dark(DEFAULT_ACCENT));
+    static SCALE: Cell<f32> = const { Cell::new(1.0) };
+    static DENSITY: Cell<f32> = const { Cell::new(1.0) };
+    static UI_MONO: Cell<bool> = const { Cell::new(false) };
+    static FONTS: Cell<Option<MonoFont>> = const { Cell::new(None) };
+}
+
+/// Spacing multiplier from the density preference (compact < 1 < comfortable).
+pub fn density() -> f32 {
+    DENSITY.with(Cell::get)
+}
+
+/// A layout size in points scaled by density.
+pub fn dp(points: f32) -> f32 {
+    (points * density()).round()
 }
 
 pub fn palette() -> Palette {
@@ -200,12 +233,13 @@ pub fn rgba(c: Color32) -> [f32; 4] {
 
 /// Numbers, tickers and tables (SF Mono on macOS).
 pub fn mono(size: f32) -> FontId {
-    FontId::new(size, FontFamily::Monospace)
+    FontId::new(size * SCALE.with(Cell::get), FontFamily::Monospace)
 }
 
 /// Chrome: titles, buttons, labels (SF Pro on macOS).
 pub fn ui_font(size: f32) -> FontId {
-    FontId::new(size, FontFamily::Proportional)
+    let family = if UI_MONO.with(Cell::get) { FontFamily::Monospace } else { FontFamily::Proportional };
+    FontId::new(size * SCALE.with(Cell::get), family)
 }
 
 /// Corner radii for cards and controls.
@@ -213,24 +247,19 @@ pub const CARD_RADIUS: u8 = 10;
 pub const CONTROL_RADIUS: u8 = 6;
 
 /// Use the system UI fonts when present (read from the OS at runtime, not bundled).
-fn install_fonts(ctx: &egui::Context) {
+fn install_fonts(ctx: &egui::Context, mono: MonoFont) {
+    if FONTS.with(Cell::get) == Some(mono) {
+        return;
+    }
+    FONTS.with(|f| f.set(Some(mono)));
     let mut fonts = FontDefinitions::default();
-    let candidates: &[(&str, FontFamily, &[&str])] = &[
-        (
-            "system-ui",
-            FontFamily::Proportional,
-            &[
-                "/System/Library/Fonts/SFNS.ttf",
-                "/System/Library/Fonts/SFNSText.ttf",
-                "/System/Library/Fonts/Helvetica.ttc",
-            ],
-        ),
-        (
-            "system-mono",
-            FontFamily::Monospace,
-            &["/System/Library/Fonts/SFNSMono.ttf", "/System/Library/Fonts/Menlo.ttc"],
-        ),
+    let ui_paths: &[&str] = &[
+        "/System/Library/Fonts/SFNS.ttf",
+        "/System/Library/Fonts/SFNSText.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",
     ];
+    let candidates: &[(&str, FontFamily, &[&str])] =
+        &[("system-ui", FontFamily::Proportional, ui_paths), ("system-mono", FontFamily::Monospace, mono.paths())];
     for (name, family, paths) in candidates {
         if let Some(bytes) = paths.iter().find_map(|p| std::fs::read(p).ok()) {
             fonts.font_data.insert((*name).into(), std::sync::Arc::new(FontData::from_owned(bytes)));
@@ -285,8 +314,14 @@ fn accent_wash_for(p: &Palette) -> Color32 {
 }
 
 /// One-time setup: fonts and text styles. Visuals are refreshed by [`refresh`].
-pub fn apply(ctx: &egui::Context, accent: Color32) {
-    install_fonts(ctx);
+/// Apply appearance preferences: fonts, text scale, density, theme mode and colours.
+/// `system_accent` is used unless the user picked an accent.
+pub fn configure(ctx: &egui::Context, a: &Appearance, system_accent: Color32) {
+    install_fonts(ctx, a.mono_font);
+    SCALE.with(|c| c.set(a.font_scale.clamp(0.7, 1.6)));
+    DENSITY.with(|c| c.set(a.density.factor()));
+    UI_MONO.with(|c| c.set(a.ui_font == UiFont::Monospace));
+    let d = density();
     ctx.all_styles_mut(|s| {
         s.text_styles = [
             (TextStyle::Small, ui_font(10.5)),
@@ -296,21 +331,29 @@ pub fn apply(ctx: &egui::Context, accent: Color32) {
             (TextStyle::Monospace, mono(12.0)),
         ]
         .into();
-        s.spacing.item_spacing = egui::vec2(6.0, 3.0);
-        s.spacing.button_padding = egui::vec2(8.0, 3.0);
-        s.spacing.interact_size.y = 20.0;
-        s.spacing.menu_margin = egui::Margin::same(6);
+        s.spacing.item_spacing = egui::vec2(6.0 * d, 3.0 * d);
+        s.spacing.button_padding = egui::vec2(8.0 * d, 3.0 * d);
+        s.spacing.interact_size.y = 20.0 * d;
+        s.spacing.menu_margin = egui::Margin::same((6.0 * d) as i8);
         s.animation_time = 0.18;
     });
-    refresh(ctx, accent);
+    ctx.set_theme(match a.mode {
+        ThemeMode::System => egui::ThemePreference::System,
+        ThemeMode::Light => egui::ThemePreference::Light,
+        ThemeMode::Dark => egui::ThemePreference::Dark,
+    });
+    // Force visuals to be rebuilt with the new colours.
+    set_palette(Palette { accent: Color32::TRANSPARENT, ..palette() });
+    refresh(ctx, a, system_accent);
 }
 
 /// Pick the palette for the current system appearance and accent; call every frame.
-pub fn refresh(ctx: &egui::Context, accent: Color32) {
-    let p = Palette::for_theme(ctx.theme(), accent);
+pub fn refresh(ctx: &egui::Context, a: &Appearance, system_accent: Color32) {
+    let accent = a.accent.map_or(system_accent, |c| Color32::from_rgb(c[0], c[1], c[2]));
+    let p = Palette::for_theme(ctx.theme(), accent).customized(a);
     if p != palette() {
-        ctx.set_visuals_of(Theme::Dark, visuals(&Palette::dark(accent)));
-        ctx.set_visuals_of(Theme::Light, visuals(&Palette::light(accent)));
+        ctx.set_visuals_of(Theme::Dark, visuals(&Palette::dark(accent).customized(a)));
+        ctx.set_visuals_of(Theme::Light, visuals(&Palette::light(accent).customized(a)));
     }
     set_palette(p);
 }
@@ -330,5 +373,10 @@ mod tests {
         set_palette(Palette::light(Color32::RED));
         assert_eq!(accent(), Color32::RED);
         assert!(!palette().dark);
+        let a = Appearance { up: Some([1, 2, 3]), highlight: Some([200, 100, 0]), ..Default::default() };
+        let p = Palette::dark(DEFAULT_ACCENT).customized(&a);
+        assert_eq!(p.up, Color32::from_rgb(1, 2, 3));
+        assert_eq!(p.amber, Color32::from_rgb(200, 100, 0));
+        assert_eq!(p.down, Palette::dark(DEFAULT_ACCENT).down);
     }
 }

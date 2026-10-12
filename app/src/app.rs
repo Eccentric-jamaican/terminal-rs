@@ -1,33 +1,42 @@
-//! Top-level terminal: command line, tiling panes, hotkeys, status/function-key bars.
+//! Top-level terminal: command line, docked panes, saved layouts, hotkeys and status bar.
+//!
+//! Submodules: `chrome` (toolbar, sidebar, status bar), `workspace` (dock rendering,
+//! drag and drop, pop-out windows, link groups, saved layouts), `panels` (per-kind pane
+//! content) and `settings_view` (preferences UI).
+
+mod chrome;
+mod panels;
+mod settings_view;
+mod workspace;
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use egui::{Color32, Event, Key, Modifiers, Rect, RichText, Ui, UiBuilder, pos2, vec2};
+use egui::{Color32, Event, Key, Modifiers, Rect, Ui, UiBuilder, pos2, vec2};
 use serde::{Deserialize, Serialize};
-use tr_chart::drawings::{Drawing, Tool};
-use tr_chart::scene::ChartType;
+use tr_chart::drawings::Tool;
 use tr_congress::Trade;
 use tr_congress::db::{Alert, PoliticianSummary};
-use tr_core::Timeframe;
-use tr_data::{Quote, SearchHit, YieldCurves};
+use tr_data::{NewsItem, OrderBook, Quote, SearchHit, YieldCurves};
 
 use crate::anim;
 use crate::chart_view::ChartState;
-use crate::command::{self, Command, Function, IndicatorSpec};
-use crate::congress_view::{self, Action, FeedFilter};
+use crate::command::{self, Command, Function};
+use crate::congress_view::{Action, FeedFilter};
+use crate::dock::{Node, PaneId};
 use crate::layout::Layout;
+use crate::layouts::{LayoutDoc, Link, PaneSettings, Store, WindowGeometry};
 use crate::markets_view;
-use crate::theme::{self, amber, mono, muted, text};
-use crate::worker::{PaneId, Profile, Request, Response, Worker, data_dir};
+use crate::prefs::{self, Prefs};
+use crate::theme;
+use crate::worker::{Profile, Request, Response, Worker, data_dir};
 
-mod chrome;
-
-use chrome::{GAP, SIDEBAR_W, STATUS_H, SidebarCmd, TOOLBAR_H, TRAFFIC_INSET};
+use chrome::{SIDEBAR_W, STATUS_H, SidebarCmd, TOOLBAR_H, TRAFFIC_INSET};
+use settings_view::SettingsTab;
 
 pub enum PaneKind {
     Chart(Box<ChartState>),
-    Feed,
+    Feed { filter: FeedFilter },
     Ticker { symbol: String, trades: Vec<Trade>, loading: bool },
     Profile { query: String, data: Option<Box<Profile>>, loading: bool },
     Politicians,
@@ -37,25 +46,177 @@ pub enum PaneKind {
     Wei,
     Curve,
     Search { query: String },
+    News(Box<NewsPane>),
+    OrderBook(Box<BookPane>),
+    Settings,
+}
+
+pub struct NewsPane {
+    /// `None` = general market headlines.
+    pub symbol: Option<String>,
+    pub items: Vec<NewsItem>,
+    pub error: Option<String>,
+    pub loading: bool,
+    pub fetched: Option<Instant>,
+}
+
+impl NewsPane {
+    pub fn new(symbol: Option<String>) -> Self {
+        Self { symbol, items: Vec::new(), error: None, loading: true, fetched: None }
+    }
+}
+
+pub struct BookPane {
+    pub symbol: String,
+    pub depth: usize,
+    /// Price bucket; 0 = raw levels.
+    pub group: f64,
+    pub book: Option<OrderBook>,
+    pub error: Option<String>,
+    pub fetched: Option<Instant>,
+}
+
+impl BookPane {
+    pub fn new(symbol: &str, depth: usize, group: f64) -> Self {
+        Self { symbol: symbol.into(), depth, group, book: None, error: None, fetched: None }
+    }
 }
 
 impl PaneKind {
-    fn title(&self) -> String {
+    /// Short tab title.
+    fn tab_title(&self) -> String {
+        let short = |s: &str| tr_data::security(s).ticker;
         match self {
-            PaneKind::Chart(c) => format!("GP {}", c.symbol),
-            PaneKind::Feed => "CONG  Latest congressional trades (STOCK Act PTRs)".into(),
-            PaneKind::Ticker { symbol, .. } => format!("{symbol} CONG  Who in Congress traded {symbol}"),
-            PaneKind::Profile { query, data, .. } => match data {
-                Some(p) => format!("POL  {}", p.politician.name),
-                None => format!("POL  {query}"),
+            PaneKind::Chart(c) => short(&c.symbol),
+            PaneKind::Feed { .. } => "Congress".into(),
+            PaneKind::Ticker { symbol, .. } => format!("{} Congress", short(symbol)),
+            PaneKind::Profile { query, data, .. } => {
+                data.as_ref().map_or_else(|| query.clone(), |p| p.politician.name.clone())
+            }
+            PaneKind::Politicians => "Politicians".into(),
+            PaneKind::Alerts => "Alerts".into(),
+            PaneKind::Watchlist => "Watchlist".into(),
+            PaneKind::Help => "Help".into(),
+            PaneKind::Wei => "World Markets".into(),
+            PaneKind::Curve => "Yield Curve".into(),
+            PaneKind::Search { query } if query.is_empty() => "Search".into(),
+            PaneKind::Search { query } => format!("Search: {query}"),
+            PaneKind::News(n) => match &n.symbol {
+                Some(s) => format!("{} News", short(s)),
+                None => "Top News".into(),
             },
-            PaneKind::Politicians => "POL  Politicians (☆ to track)".into(),
-            PaneKind::Alerts => "ALRT  Alerts for tracked politicians".into(),
-            PaneKind::Watchlist => "WL  Watchlist".into(),
-            PaneKind::Help => "HELP  Commands and hotkeys".into(),
-            PaneKind::Wei => "WEI  World markets: indices, futures, rates, FX, crypto, commodities".into(),
-            PaneKind::Curve => "GC  US Treasury yield curve (Treasury.gov par yields)".into(),
-            PaneKind::Search { query } => format!("SECF  Security search: {query}"),
+            PaneKind::OrderBook(b) => format!("{} Depth", short(&b.symbol)),
+            PaneKind::Settings => "Settings".into(),
+        }
+    }
+
+    /// The Bloomberg-style function code shown on the tab.
+    fn code(&self) -> &'static str {
+        match self {
+            PaneKind::Chart(_) => "GP",
+            PaneKind::Feed { .. } | PaneKind::Ticker { .. } => "CONG",
+            PaneKind::Profile { .. } | PaneKind::Politicians => "POL",
+            PaneKind::Alerts => "ALRT",
+            PaneKind::Watchlist => "WL",
+            PaneKind::Help => "HELP",
+            PaneKind::Wei => "WEI",
+            PaneKind::Curve => "GC",
+            PaneKind::Search { .. } => "SECF",
+            PaneKind::News(_) => "CN",
+            PaneKind::OrderBook(_) => "OB",
+            PaneKind::Settings => "PDF",
+        }
+    }
+
+    /// The security this pane follows, for symbol-driven panels.
+    fn symbol(&self) -> Option<&str> {
+        match self {
+            PaneKind::Chart(c) => Some(&c.symbol),
+            PaneKind::Ticker { symbol, .. } => Some(symbol),
+            PaneKind::News(n) => n.symbol.as_deref(),
+            PaneKind::OrderBook(b) => Some(&b.symbol),
+            _ => None,
+        }
+    }
+
+    fn follows_symbol(&self) -> bool {
+        matches!(self, PaneKind::Chart(_) | PaneKind::Ticker { .. } | PaneKind::News(_) | PaneKind::OrderBook(_))
+    }
+
+    fn settings(&self) -> PaneSettings {
+        match self {
+            PaneKind::Chart(c) => PaneSettings::Chart {
+                symbol: c.symbol.clone(),
+                tf: c.tf,
+                chart_type: c.chart_type,
+                log: c.log,
+                indicators: c.indicators.clone(),
+                drawings: c.drawings.clone(),
+                compare: c.compare.clone(),
+                show_volume: c.show_volume,
+                show_congress: c.show_congress,
+                magnet: c.magnet,
+            },
+            PaneKind::Feed { filter } => {
+                PaneSettings::Feed((*filter != FeedFilter::default()).then(|| (*filter).into()))
+            }
+            PaneKind::Ticker { symbol, .. } => PaneSettings::Ticker(symbol.clone()),
+            PaneKind::Profile { query, .. } => PaneSettings::Profile(query.clone()),
+            PaneKind::Politicians => PaneSettings::Politicians,
+            PaneKind::Alerts => PaneSettings::Alerts,
+            PaneKind::Watchlist => PaneSettings::Watchlist,
+            PaneKind::Help => PaneSettings::Help,
+            PaneKind::Wei => PaneSettings::Wei,
+            PaneKind::Curve => PaneSettings::Curve,
+            PaneKind::Search { query } => PaneSettings::Search(query.clone()),
+            PaneKind::News(n) => PaneSettings::News(n.symbol.clone()),
+            PaneKind::OrderBook(b) => {
+                PaneSettings::OrderBook { symbol: b.symbol.clone(), depth: b.depth, group: b.group }
+            }
+            PaneKind::Settings => PaneSettings::Settings,
+        }
+    }
+
+    fn from_settings(p: PaneSettings) -> PaneKind {
+        match p {
+            PaneSettings::Chart {
+                symbol,
+                tf,
+                chart_type,
+                log,
+                indicators,
+                drawings,
+                compare,
+                show_volume,
+                show_congress,
+                magnet,
+            } => {
+                let mut c = ChartState::new(0, &symbol, tf);
+                c.chart_type = chart_type;
+                c.log = log;
+                c.indicators = indicators;
+                c.drawings = drawings;
+                c.compare = compare;
+                c.show_volume = show_volume;
+                c.show_congress = show_congress;
+                c.magnet = magnet;
+                PaneKind::Chart(Box::new(c))
+            }
+            PaneSettings::Feed(f) => PaneKind::Feed { filter: f.map(Into::into).unwrap_or_default() },
+            PaneSettings::Ticker(s) => PaneKind::Ticker { symbol: s, trades: Vec::new(), loading: true },
+            PaneSettings::Profile(q) => PaneKind::Profile { query: q, data: None, loading: true },
+            PaneSettings::Politicians => PaneKind::Politicians,
+            PaneSettings::Alerts => PaneKind::Alerts,
+            PaneSettings::Watchlist => PaneKind::Watchlist,
+            PaneSettings::Help => PaneKind::Help,
+            PaneSettings::Wei => PaneKind::Wei,
+            PaneSettings::Curve => PaneKind::Curve,
+            PaneSettings::Search(q) => PaneKind::Search { query: q },
+            PaneSettings::News(s) => PaneKind::News(Box::new(NewsPane::new(s))),
+            PaneSettings::OrderBook { symbol, depth, group } => {
+                PaneKind::OrderBook(Box::new(BookPane::new(&symbol, depth, group)))
+            }
+            PaneSettings::Settings => PaneKind::Settings,
         }
     }
 }
@@ -63,53 +224,109 @@ impl PaneKind {
 pub struct Pane {
     pub id: PaneId,
     pub kind: PaneKind,
+    pub link: Option<Link>,
+    /// User-chosen tab title.
+    pub title: Option<String>,
+    /// Set while popped out into its own window.
+    pub window: Option<WindowGeometry>,
 }
 
-/// Persisted between runs.
+impl Pane {
+    fn display_title(&self) -> String {
+        self.title.clone().unwrap_or_else(|| self.kind.tab_title())
+    }
+}
+
+/// App-wide state persisted in `settings.json` (layouts live in their own files).
 #[derive(Serialize, Deserialize)]
 struct Settings {
-    layout: Layout,
+    #[serde(default)]
     watchlist: Vec<String>,
-    panes: Vec<PaneSettings>,
     #[serde(default = "default_true")]
     sidebar: bool,
+    /// Name of the layout to restore on launch.
+    #[serde(default)]
+    active_layout: Option<String>,
+    // Pre-docking settings files stored a preset and a pane list here.
+    #[serde(default, skip_serializing)]
+    layout: Option<Layout>,
+    #[serde(default, skip_serializing)]
+    panes: Option<Vec<serde_json::Value>>,
 }
 
 fn default_true() -> bool {
     true
 }
 
-#[derive(Serialize, Deserialize)]
-enum PaneSettings {
-    Chart {
-        symbol: String,
-        tf: Timeframe,
-        chart_type: ChartType,
-        log: bool,
-        indicators: Vec<IndicatorSpec>,
-        drawings: Vec<Drawing>,
-        compare: Option<String>,
-    },
-    Feed,
-    Ticker(String),
-    Profile(String),
-    Politicians,
-    Alerts,
-    Watchlist,
-    Help,
-    Wei,
-    Curve,
-    Search(String),
+const DEFAULT_WATCHLIST: [&str; 11] = [
+    "SPX Index",
+    "AAPL US Equity",
+    "NVDA US Equity",
+    "SPY US Equity",
+    "BTCUSD Curncy",
+    "ETHUSD Curncy",
+    "EURUSD Curncy",
+    "USDJPY Curncy",
+    "US10Y Govt",
+    "CL1 Comdty",
+    "GC1 Comdty",
+];
+
+/// Convert a pre-docking settings file into a layout document.
+fn migrate_legacy(s: &Settings, defaults: &prefs::PanelDefaults) -> Option<LayoutDoc> {
+    let panes: Vec<PaneSettings> = s
+        .panes
+        .as_ref()?
+        .iter()
+        .filter_map(|v| {
+            // Unit variants were stored as bare strings ("Feed"); wrap them as {"Feed": null}.
+            let v = match v {
+                serde_json::Value::String(name) => serde_json::json!({ name.as_str(): null }),
+                other => other.clone(),
+            };
+            serde_json::from_value(v).ok()
+        })
+        .collect();
+    if panes.is_empty() {
+        return None;
+    }
+    let _ = defaults;
+    Some(LayoutDoc::preset("Default", s.layout.unwrap_or(Layout::Grid2x2), panes))
+}
+
+/// An in-progress tab drag.
+#[derive(Debug, Clone, Copy)]
+pub struct Drag {
+    pub pane: PaneId,
 }
 
 pub struct TerminalApp {
     worker: Worker,
     provider: String,
-    layout: Layout,
     panes: Vec<Pane>,
-    focus: usize,
+    dock: Node,
+    focus: PaneId,
     next_id: PaneId,
-    last_opened: Option<usize>,
+    last_opened: Option<PaneId>,
+    /// Preset last applied, for the toolbar picker (cleared by manual rearranging).
+    preset: Option<Layout>,
+    drag: Option<Drag>,
+    /// Tab being renamed inline: pane and edit buffer.
+    renaming_tab: Option<(PaneId, String)>,
+
+    store: Store,
+    layout_name: String,
+    layout_names: Vec<String>,
+    last_saved: Vec<u8>,
+    /// Layout being renamed in the sidebar: old name and edit buffer.
+    renaming_layout: Option<(String, String)>,
+
+    prefs: Prefs,
+    applied_appearance: Option<prefs::Appearance>,
+    rebinding: Option<prefs::Action>,
+    settings_tab: SettingsTab,
+    io_path: String,
+
     curves: Option<Box<YieldCurves>>,
     last_wei: Option<Instant>,
     last_curve: Option<Instant>,
@@ -129,7 +346,6 @@ pub struct TerminalApp {
     toasts: Vec<(String, Instant)>,
 
     latest: Vec<Trade>,
-    feed_filter: FeedFilter,
     politicians: Vec<PoliticianSummary>,
     pol_search: String,
     alerts: Vec<Alert>,
@@ -150,7 +366,7 @@ pub struct TerminalApp {
 
     sidebar_open: bool,
     /// System accent colour (macOS) or the default blue.
-    accent: Color32,
+    system_accent: Color32,
     last_accent_poll: Option<Instant>,
     window_styled: bool,
     /// The window is see-through behind the sidebar (macOS vibrancy).
@@ -178,25 +394,44 @@ fn settings_path() -> std::path::PathBuf {
     data_dir().join("settings.json")
 }
 
+fn prefs_path() -> std::path::PathBuf {
+    data_dir().join("prefs.json")
+}
+
 impl TerminalApp {
     pub fn new(ctx: &egui::Context, worker: Worker, provider: String) -> Self {
-        let accent = tr_macos::accent_color().map_or(theme::DEFAULT_ACCENT, |[r, g, b]| Color32::from_rgb(r, g, b));
-        theme::apply(ctx, accent);
+        let system_accent =
+            tr_macos::accent_color().map_or(theme::DEFAULT_ACCENT, |[r, g, b]| Color32::from_rgb(r, g, b));
+        let mut prefs = Prefs::load(&prefs_path());
         match std::env::var("TR_THEME").map(|v| v.to_ascii_lowercase()).as_deref() {
-            Ok("light") => ctx.set_theme(egui::ThemePreference::Light),
-            Ok("dark") => ctx.set_theme(egui::ThemePreference::Dark),
-            _ => ctx.set_theme(egui::ThemePreference::System),
+            Ok("light") => prefs.appearance.mode = prefs::ThemeMode::Light,
+            Ok("dark") => prefs.appearance.mode = prefs::ThemeMode::Dark,
+            _ => {}
         }
+        theme::configure(ctx, &prefs.appearance, system_accent);
         let settings: Option<Settings> =
             std::fs::read(settings_path()).ok().and_then(|b| serde_json::from_slice(&b).ok());
         let mut app = Self {
             worker,
             provider,
-            layout: Layout::Grid2x2,
             panes: Vec::new(),
+            dock: Node::default(),
             focus: 0,
             next_id: 1,
             last_opened: None,
+            preset: None,
+            drag: None,
+            renaming_tab: None,
+            store: Store::new(data_dir().join("layouts")),
+            layout_name: "Default".into(),
+            layout_names: Vec::new(),
+            last_saved: Vec::new(),
+            renaming_layout: None,
+            applied_appearance: Some(prefs.appearance.clone()),
+            prefs,
+            rebinding: None,
+            settings_tab: SettingsTab::Appearance,
+            io_path: String::new(),
             curves: None,
             last_wei: None,
             last_curve: None,
@@ -211,26 +446,11 @@ impl TerminalApp {
             status: "Ready. Type a ticker and press <GO> (Enter). F1 for help.".into(),
             toasts: Vec::new(),
             latest: Vec::new(),
-            feed_filter: FeedFilter::default(),
             politicians: Vec::new(),
             pol_search: String::new(),
             alerts: Vec::new(),
             congress_status: String::new(),
-            watchlist: [
-                "SPX Index",
-                "AAPL US Equity",
-                "NVDA US Equity",
-                "SPY US Equity",
-                "BTCUSD Curncy",
-                "ETHUSD Curncy",
-                "EURUSD Curncy",
-                "USDJPY Curncy",
-                "US10Y Govt",
-                "CL1 Comdty",
-                "GC1 Comdty",
-            ]
-            .map(String::from)
-            .to_vec(),
+            watchlist: DEFAULT_WATCHLIST.map(String::from).to_vec(),
             quotes: HashMap::new(),
             last_quotes: None,
             last_feed: None,
@@ -242,227 +462,68 @@ impl TerminalApp {
             perf_dt_ms: 0.0,
             last_frame: None,
             sidebar_open: true,
-            accent,
+            system_accent,
             last_accent_poll: None,
             window_styled: false,
             vibrancy: false,
         };
-        match settings {
-            Some(s) => {
-                app.layout = s.layout;
+        let mut doc = None;
+        if let Some(s) = &settings {
+            if !s.watchlist.is_empty() {
                 // Older settings stored bare tickers; normalise to market keys.
                 app.watchlist = s.watchlist.iter().map(|w| tr_data::security(w).key()).collect();
                 app.watchlist.dedup();
-                app.sidebar_open = s.sidebar;
-                for p in s.panes {
-                    let kind = app.kind_from_settings(p);
-                    app.push_pane(kind);
+            }
+            app.sidebar_open = s.sidebar;
+            if let Some(name) = &s.active_layout {
+                match app.store.load(name) {
+                    Ok(d) => doc = Some(d),
+                    Err(e) => tracing::warn!("restoring layout {name:?}: {e:#}"),
                 }
             }
-            None => {
-                for kind in [
-                    PaneKind::Chart(Box::new(ChartState::new(0, "AAPL", Timeframe::D1))),
-                    PaneKind::Feed,
-                    PaneKind::Wei,
-                    PaneKind::Watchlist,
-                ] {
-                    app.push_pane(kind);
-                }
+            if doc.is_none() {
+                doc = migrate_legacy(s, &app.prefs.panels);
             }
         }
-        app.fit_panes_to_layout();
+        let doc = doc
+            .or_else(|| app.store.list().first().and_then(|n| app.store.load(n).ok()))
+            .unwrap_or_else(|| LayoutDoc::default_workspace("Default", &app.prefs.panels));
+        app.apply_doc(doc);
+        if !app.store.exists(&app.layout_name) {
+            app.save_layout();
+        }
+        app.refresh_layout_names();
         app.worker.send(Request::Latest { limit: 2_000 });
         app.worker.send(Request::SearchPoliticians(String::new()));
         app.worker.send(Request::Alerts);
         app
     }
 
-    fn kind_from_settings(&mut self, p: PaneSettings) -> PaneKind {
-        match p {
-            PaneSettings::Chart { symbol, tf, chart_type, log, indicators, drawings, compare } => {
-                let mut c = ChartState::new(0, &symbol, tf);
-                c.chart_type = chart_type;
-                c.log = log;
-                c.indicators = indicators;
-                c.drawings = drawings;
-                c.compare = compare;
-                PaneKind::Chart(Box::new(c))
-            }
-            PaneSettings::Feed => PaneKind::Feed,
-            PaneSettings::Ticker(s) => PaneKind::Ticker { symbol: s, trades: Vec::new(), loading: true },
-            PaneSettings::Profile(q) => PaneKind::Profile { query: q, data: None, loading: true },
-            PaneSettings::Politicians => PaneKind::Politicians,
-            PaneSettings::Alerts => PaneKind::Alerts,
-            PaneSettings::Watchlist => PaneKind::Watchlist,
-            PaneSettings::Help => PaneKind::Help,
-            PaneSettings::Wei => PaneKind::Wei,
-            PaneSettings::Curve => PaneKind::Curve,
-            PaneSettings::Search(q) => PaneKind::Search { query: q },
-        }
-    }
-
     fn save_settings(&self) {
-        let panes = self
-            .panes
-            .iter()
-            .map(|p| match &p.kind {
-                PaneKind::Chart(c) => PaneSettings::Chart {
-                    symbol: c.symbol.clone(),
-                    tf: c.tf,
-                    chart_type: c.chart_type,
-                    log: c.log,
-                    indicators: c.indicators.clone(),
-                    drawings: c.drawings.clone(),
-                    compare: c.compare.clone(),
-                },
-                PaneKind::Feed => PaneSettings::Feed,
-                PaneKind::Ticker { symbol, .. } => PaneSettings::Ticker(symbol.clone()),
-                PaneKind::Profile { query, .. } => PaneSettings::Profile(query.clone()),
-                PaneKind::Politicians => PaneSettings::Politicians,
-                PaneKind::Alerts => PaneSettings::Alerts,
-                PaneKind::Watchlist => PaneSettings::Watchlist,
-                PaneKind::Help => PaneSettings::Help,
-                PaneKind::Wei => PaneSettings::Wei,
-                PaneKind::Curve => PaneSettings::Curve,
-                PaneKind::Search { query } => PaneSettings::Search(query.clone()),
-            })
-            .collect();
-        let s = Settings { layout: self.layout, watchlist: self.watchlist.clone(), panes, sidebar: self.sidebar_open };
-        if let Ok(json) = serde_json::to_vec_pretty(&s) {
-            let path = settings_path();
-            let tmp = path.with_extension("json.tmp");
-            if std::fs::write(&tmp, json).is_ok() {
-                let _ = std::fs::rename(tmp, path);
-            }
+        let s = Settings {
+            watchlist: self.watchlist.clone(),
+            sidebar: self.sidebar_open,
+            active_layout: Some(self.layout_name.clone()),
+            layout: None,
+            panes: None,
+        };
+        if let Ok(json) = serde_json::to_vec_pretty(&s)
+            && let Err(e) = crate::layouts::write_atomic(&settings_path(), &json)
+        {
+            tracing::warn!("saving settings: {e}");
         }
     }
 
-    /// Add a pane, assigning an id and kicking off any loads it needs.
-    fn push_pane(&mut self, kind: PaneKind) -> usize {
-        let id = self.next_id;
-        self.next_id += 1;
-        let kind = self.init_kind(id, kind);
-        self.panes.push(Pane { id, kind });
-        self.panes.len() - 1
-    }
-
-    fn init_kind(&mut self, id: PaneId, kind: PaneKind) -> PaneKind {
-        match kind {
-            PaneKind::Chart(mut c) => {
-                c.id = id;
-                c.load(&self.worker);
-                PaneKind::Chart(c)
-            }
-            PaneKind::Ticker { symbol, .. } => {
-                self.worker.send(Request::TickerTrades { pane: id, symbol: symbol.clone() });
-                PaneKind::Ticker { symbol, trades: Vec::new(), loading: true }
-            }
-            PaneKind::Profile { query, .. } => {
-                self.worker.send(Request::Profile { pane: id, query: query.clone() });
-                PaneKind::Profile { query, data: None, loading: true }
-            }
-            k => k,
+    fn save_prefs(&mut self) {
+        if let Err(e) = self.prefs.save(&prefs_path()) {
+            self.status = format!("Could not save preferences: {e}");
         }
-    }
-
-    fn replace_pane(&mut self, idx: usize, kind: PaneKind) {
-        let id = self.next_id;
-        self.next_id += 1;
-        let kind = self.init_kind(id, kind);
-        let old = std::mem::replace(&mut self.panes[idx], Pane { id, kind });
-        self.worker.send(Request::Forget(old.id));
-    }
-
-    fn fit_panes_to_layout(&mut self) {
-        let n = self.layout.slots();
-        while self.panes.len() < n {
-            let has = |f: fn(&PaneKind) -> bool| self.panes.iter().any(|p| f(&p.kind));
-            let kind = if !has(|k| matches!(k, PaneKind::Feed)) {
-                PaneKind::Feed
-            } else if !has(|k| matches!(k, PaneKind::Watchlist)) {
-                PaneKind::Watchlist
-            } else if !has(|k| matches!(k, PaneKind::Wei)) {
-                PaneKind::Wei
-            } else if !has(|k| matches!(k, PaneKind::Curve)) {
-                PaneKind::Curve
-            } else if !has(|k| matches!(k, PaneKind::Politicians)) {
-                PaneKind::Politicians
-            } else if !has(|k| matches!(k, PaneKind::Alerts)) {
-                PaneKind::Alerts
-            } else {
-                let sym = ["BTCUSD Curncy", "SPX Index", "EURUSD Curncy", "CL1 Comdty"][self.panes.len() % 4];
-                PaneKind::Chart(Box::new(ChartState::new(0, sym, Timeframe::D1)))
-            };
-            self.push_pane(kind);
-        }
-        for p in self.panes.drain(n.min(self.panes.len())..) {
-            self.worker.send(Request::Forget(p.id));
-        }
-        self.focus = self.focus.min(n - 1);
-        self.last_opened = self.last_opened.filter(|&i| i < n);
-    }
-
-    /// Where to show a non-chart panel: an existing pane of the same type, else a pane
-    /// whose kind is shown twice, else a non-chart pane that wasn't just opened, else the
-    /// pane after the focused chart.
-    fn target_pane(&self, same: impl Fn(&PaneKind) -> bool) -> usize {
-        if let Some(i) = self.panes.iter().position(|p| same(&p.kind)) {
-            return i;
-        }
-        let disc = |i: usize| std::mem::discriminant(&self.panes[i].kind);
-        let n = self.panes.len();
-        if let Some(i) = (0..n).rev().find(|&i| {
-            !matches!(self.panes[i].kind, PaneKind::Chart(_)) && (0..n).any(|j| j != i && disc(j) == disc(i))
-        }) {
-            return i;
-        }
-        let candidates: Vec<usize> = (0..n).filter(|&i| !matches!(self.panes[i].kind, PaneKind::Chart(_))).collect();
-        if let Some(&i) = candidates.iter().find(|&&i| Some(i) != self.last_opened && i != self.focus) {
-            return i;
-        }
-        if let Some(&i) = candidates.first() {
-            return i;
-        }
-        if n > 1 { (self.focus + 1) % n } else { self.focus }
-    }
-
-    fn chart_index(&mut self) -> usize {
-        if matches!(self.panes[self.focus].kind, PaneKind::Chart(_)) {
-            return self.focus;
-        }
-        if let Some(i) = self.panes.iter().position(|p| matches!(p.kind, PaneKind::Chart(_))) {
-            return i;
-        }
-        let f = self.focus;
-        self.replace_pane(f, PaneKind::Chart(Box::new(ChartState::new(0, "SPY", Timeframe::D1))));
-        f
-    }
-
-    fn with_chart(&mut self, f: impl FnOnce(&mut ChartState, &Worker)) {
-        let i = self.chart_index();
-        self.focus = i;
-        if let PaneKind::Chart(c) = &mut self.panes[i].kind {
-            f(c, &self.worker);
-        }
-    }
-
-    fn open_chart(&mut self, symbol: &str) {
-        self.with_chart(|c, w| c.set_symbol(symbol, w));
-        self.status = tr_data::security(symbol).key();
-    }
-
-    fn open_panel(&mut self, kind: PaneKind) {
-        let disc = std::mem::discriminant(&kind);
-        let idx = self.target_pane(|k| std::mem::discriminant(k) == disc);
-        self.replace_pane(idx, kind);
-        self.focus = idx;
-        self.last_opened = Some(idx);
     }
 
     fn run_actions(&mut self, actions: Vec<Action>) {
         for a in actions {
             match a {
-                Action::OpenChart(s) => self.open_chart(&s),
+                Action::OpenChart(s) => self.open_security(&s),
                 Action::OpenTicker(s) => {
                     self.open_panel(PaneKind::Ticker { symbol: s, trades: Vec::new(), loading: true })
                 }
@@ -475,10 +536,11 @@ impl TerminalApp {
                         self.last_quotes = None;
                     }
                 }
+                Action::LinkedSymbol(link, s) => self.broadcast(link, &s, None),
                 Action::Track(q, on) => {
                     self.worker.send(Request::Track { query: q.clone(), on });
                     // Refresh any open profile so the star updates.
-                    for p in &mut self.panes {
+                    for p in &self.panes {
                         if let PaneKind::Profile { query, .. } = &p.kind {
                             self.worker.send(Request::Profile { pane: p.id, query: query.clone() });
                         }
@@ -495,13 +557,25 @@ impl TerminalApp {
         };
         self.cmd_history.push(input.trim().to_string());
         match cmd {
-            Command::Symbol(s) => self.open_chart(&s),
+            Command::Symbol(s) => self.open_security(&s),
             Command::SymbolFunction(s, Function::Congress) => {
                 self.open_panel(PaneKind::Ticker { symbol: s.clone(), trades: Vec::new(), loading: true });
                 self.status = format!("{s}: congressional trades");
             }
+            Command::SymbolFunction(s, Function::News) => {
+                self.open_panel(PaneKind::News(Box::new(NewsPane::new(Some(s.clone())))));
+                self.status = format!("{s}: news");
+            }
+            Command::SymbolFunction(s, Function::OrderBook(depth)) => {
+                let depth = depth.unwrap_or(self.prefs.panels.book_depth).clamp(5, 200);
+                self.open_panel(PaneKind::OrderBook(Box::new(BookPane::new(&s, depth, 0.0))));
+                self.status = format!("{s}: order book");
+            }
+            Command::SymbolFunction(s, f @ (Function::NewPanel(_) | Function::Split { .. })) => {
+                self.apply_with_symbol(f, Some(s));
+            }
             Command::SymbolFunction(s, f) => {
-                self.open_chart(&s);
+                self.open_security(&s);
                 self.apply(f);
             }
             Command::Function(f) => self.apply(f),
@@ -509,6 +583,10 @@ impl TerminalApp {
     }
 
     fn apply(&mut self, f: Function) {
+        self.apply_with_symbol(f, None);
+    }
+
+    fn apply_with_symbol(&mut self, f: Function, symbol: Option<String>) {
         match f {
             Function::Timeframe(tf) => self.with_chart(|c, w| c.set_timeframe(tf, w)),
             Function::ChartType(t) => self.with_chart(|c, _| c.chart_type = t),
@@ -520,7 +598,7 @@ impl TerminalApp {
             Function::Draw(t) => self.with_chart(|c, _| c.start_tool(t)),
             Function::ClearDrawings => self.with_chart(|c, _| c.drawings.clear()),
             Function::Magnet => self.with_chart(|c, _| c.magnet = !c.magnet),
-            Function::Congress => self.open_panel(PaneKind::Feed),
+            Function::Congress => self.open_panel(PaneKind::Feed { filter: FeedFilter::default() }),
             Function::Politician(q) if q.trim().is_empty() => self.open_panel(PaneKind::Politicians),
             Function::Politician(q) => self.open_panel(PaneKind::Profile { query: q, data: None, loading: true }),
             Function::Track(q) => self.worker.send(Request::Track { query: q, on: true }),
@@ -543,28 +621,66 @@ impl TerminalApp {
                 let keys = keys_from_words(&words);
                 self.watchlist.retain(|s| !keys.contains(s));
             }
-            Function::Layout(l) => match Layout::parse(&l) {
-                Some(l) => {
-                    self.layout = l;
-                    self.fit_panes_to_layout();
-                }
-                None => self.status = format!("Unknown layout {l}; use 1, 2, 2H, 3, 4 or 6"),
-            },
-            Function::NewPane => {
-                let next = Layout::ALL.into_iter().find(|l| l.slots() > self.layout.slots());
-                if let Some(l) = next {
-                    self.layout = l;
-                    self.fit_panes_to_layout();
+            Function::Layout(arg) => self.layout_command(&arg),
+            Function::Layouts => {
+                self.settings_tab = SettingsTab::Layouts;
+                self.open_panel(PaneKind::Settings);
+                self.status = format!("Layouts: {}", self.layout_names.join(" · "));
+            }
+            Function::NewPanel(spec) => {
+                let kind = self.panel_from_spec(&spec, symbol.as_deref());
+                match kind {
+                    Some(kind) => {
+                        let target = self.focused_visible();
+                        let id = self.new_pane(kind);
+                        self.dock_pane(id, target, crate::dock::Zone::Right);
+                    }
+                    None => self.status = format!("Unknown panel {spec:?}; try CHART, NEWS, BOOK, WEI, GC, CONG, WL"),
                 }
             }
-            Function::ClosePane => {
-                if self.panes.len() > 1 {
-                    let old = self.panes.remove(self.focus);
-                    self.worker.send(Request::Forget(old.id));
-                    let prev =
-                        Layout::ALL.into_iter().rev().find(|l| l.slots() <= self.panes.len()).unwrap_or(Layout::One);
-                    self.layout = prev;
-                    self.fit_panes_to_layout();
+            Function::Split { down, panel } => match self.panel_from_spec(&panel, symbol.as_deref()) {
+                Some(kind) => {
+                    let target = self.focused_visible();
+                    let id = self.new_pane(kind);
+                    let zone = if down { crate::dock::Zone::Bottom } else { crate::dock::Zone::Right };
+                    self.dock_pane(id, target, zone);
+                }
+                None => self.status = format!("Unknown panel {panel:?}"),
+            },
+            Function::ClosePane => self.close_pane(self.focus),
+            Function::PopOut => self.pop_out(self.focus),
+            Function::Link(link) => {
+                let focus = self.focus;
+                self.set_link(focus, link);
+            }
+            Function::News => self.open_panel(PaneKind::News(Box::new(NewsPane::new(self.focused_symbol())))),
+            Function::OrderBook(depth) => {
+                let sym = self.focused_symbol().unwrap_or_else(|| "BTCUSD Curncy".into());
+                let depth = depth.unwrap_or(self.prefs.panels.book_depth).clamp(5, 200);
+                self.open_panel(PaneKind::OrderBook(Box::new(BookPane::new(&sym, depth, 0.0))));
+            }
+            Function::Settings => self.open_panel(PaneKind::Settings),
+            Function::Theme(t) => {
+                let a = &mut self.prefs.appearance;
+                for w in t.split_whitespace() {
+                    match w {
+                        "LIGHT" => a.mode = prefs::ThemeMode::Light,
+                        "DARK" => a.mode = prefs::ThemeMode::Dark,
+                        "SYSTEM" | "AUTO" => a.mode = prefs::ThemeMode::System,
+                        "COMPACT" => a.density = prefs::Density::Compact,
+                        "REGULAR" => a.density = prefs::Density::Regular,
+                        "COMFORTABLE" => a.density = prefs::Density::Comfortable,
+                        "MONO" => a.ui_font = prefs::UiFont::Monospace,
+                        "SF" | "SANS" => a.ui_font = prefs::UiFont::System,
+                        other => self.status = format!("THEME: unknown option {other}"),
+                    }
+                }
+                self.save_prefs();
+            }
+            Function::Title(t) => {
+                let focus = self.focus;
+                if let Some(p) = self.pane_mut(focus) {
+                    p.title = (!t.trim().is_empty()).then(|| t.trim().to_string());
                 }
             }
             Function::Help => self.open_panel(PaneKind::Help),
@@ -589,10 +705,10 @@ impl TerminalApp {
     // ---- worker responses ----------------------------------------------------------------
 
     fn chart_mut(&mut self, pane: PaneId) -> Option<&mut ChartState> {
-        self.panes.iter_mut().find(|p| p.id == pane).and_then(|p| match &mut p.kind {
-            PaneKind::Chart(c) => Some(c.as_mut()),
+        match self.panes.iter_mut().find(|p| p.id == pane).map(|p| &mut p.kind) {
+            Some(PaneKind::Chart(c)) => Some(c),
             _ => None,
-        })
+        }
     }
 
     fn drain(&mut self) {
@@ -670,6 +786,35 @@ impl TerminalApp {
                         *loading = false;
                     }
                 }
+                Response::News { pane, symbol, items } => {
+                    if let Some(p) = self.panes.iter_mut().find(|p| p.id == pane)
+                        && let PaneKind::News(n) = &mut p.kind
+                        && n.symbol == symbol
+                    {
+                        n.loading = false;
+                        match items {
+                            Ok(items) => {
+                                n.items = items;
+                                n.error = None;
+                            }
+                            Err(e) => n.error = Some(e),
+                        }
+                    }
+                }
+                Response::OrderBook { pane, symbol, book } => {
+                    if let Some(p) = self.panes.iter_mut().find(|p| p.id == pane)
+                        && let PaneKind::OrderBook(b) = &mut p.kind
+                        && b.symbol == symbol
+                    {
+                        match book {
+                            Ok(book) => {
+                                b.book = Some(book);
+                                b.error = None;
+                            }
+                            Err(e) => b.error = Some(e),
+                        }
+                    }
+                }
                 Response::Politicians(list) => self.politicians = list,
                 Response::Alerts(a) => self.alerts = a,
                 Response::NewAlerts(new) => {
@@ -711,9 +856,35 @@ impl TerminalApp {
     /// Global and chart hotkeys. Runs before the command line so it can claim keys; when
     /// the command line holds text, keys belong to it.
     fn hotkeys(&mut self, ctx: &egui::Context) {
-        // ⌃⌘S on macOS (Ctrl+S elsewhere) toggles the sidebar, as in native apps.
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::COMMAND, Key::S)) {
-            self.sidebar_open = !self.sidebar_open;
+        let presses: Vec<(Key, Modifiers)> = ctx.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|e| match e {
+                    Event::Key { key, pressed: true, repeat: false, modifiers, .. } if !prefs::is_modifier(*key) => {
+                        Some((*key, *modifiers))
+                    }
+                    _ => None,
+                })
+                .collect()
+        });
+        // Settings is capturing a new binding: the next key press is it.
+        if let Some(action) = self.rebinding {
+            if let Some(&(key, m)) = presses.first() {
+                ctx.input_mut(|i| i.consume_key(m, key));
+                self.rebinding = None;
+                if key != Key::Escape {
+                    let chord = prefs::Chord::from_event(key, m);
+                    let displaced = self.prefs.hotkeys.bind(action, chord);
+                    self.status = match displaced {
+                        Some(d) => {
+                            format!("{} bound to {} (removed from {})", action.label(), chord.display(), d.label())
+                        }
+                        None => format!("{} bound to {}", action.label(), chord.display()),
+                    };
+                    self.save_prefs();
+                }
+            }
+            return;
         }
         let cmd_id = egui::Id::new("command-line");
         let focused = ctx.memory(|m| m.focused());
@@ -721,6 +892,19 @@ impl TerminalApp {
         let other_text_focused = focused.is_some() && !cmd_focused;
         if other_text_focused {
             return;
+        }
+        // Chorded bindings (⌘, Ctrl, Alt) work even while the command line has text.
+        for &(key, m) in &presses {
+            let Some(action) = self.prefs.hotkeys.action_for(key, m) else { continue };
+            let chorded = m.command || m.ctrl || m.alt;
+            if !chorded && !self.cmd.is_empty() {
+                continue;
+            }
+            if !self.hotkey_applies(action) {
+                continue;
+            }
+            ctx.input_mut(|i| i.consume_key(m, key));
+            self.run_hotkey(action);
         }
         if !cmd_focused {
             // Type-anywhere: capture keystrokes until the command line has focus.
@@ -749,51 +933,10 @@ impl TerminalApp {
                 }
             }
         }
-        if !self.cmd.is_empty() {
+        if !self.cmd.is_empty() || !self.focused_is_chart() {
             return;
         }
         let pressed = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_key(m, k));
-        if pressed(Modifiers::NONE, Key::Tab) {
-            self.focus = (self.focus + 1) % self.panes.len();
-        }
-        if pressed(Modifiers::SHIFT, Key::Tab) {
-            self.focus = (self.focus + self.panes.len() - 1) % self.panes.len();
-        }
-        for (k, f) in [
-            (Key::F1, Function::Help),
-            (Key::F2, Function::Congress),
-            (Key::F3, Function::Politician(String::new())),
-            (Key::F4, Function::Alerts),
-            (Key::F5, Function::Watchlist),
-            (Key::F6, Function::Refresh),
-        ] {
-            if pressed(Modifiers::NONE, k) {
-                self.apply(f);
-            }
-        }
-        if pressed(Modifiers::NONE, Key::F12) {
-            self.show_perf = !self.show_perf;
-        }
-        let is_chart = matches!(self.panes[self.focus].kind, PaneKind::Chart(_));
-        if !is_chart {
-            return;
-        }
-        for (k, t) in
-            [(Key::T, Tool::Trendline), (Key::H, Tool::Horizontal), (Key::V, Tool::Vertical), (Key::F, Tool::Fib)]
-        {
-            if pressed(Modifiers::ALT, k) {
-                self.with_chart(|c, _| c.start_tool(t));
-            }
-        }
-        if pressed(Modifiers::ALT, Key::R) {
-            self.with_chart(|c, _| c.reset_view());
-        }
-        if pressed(Modifiers::ALT, Key::L) {
-            self.with_chart(|c, _| c.log = !c.log);
-        }
-        if pressed(Modifiers::ALT, Key::M) {
-            self.with_chart(|c, _| c.magnet = !c.magnet);
-        }
         if pressed(Modifiers::NONE, Key::Escape) {
             self.with_chart(|c, _| {
                 c.cancel();
@@ -821,122 +964,96 @@ impl TerminalApp {
         }
     }
 
-    // ---- drawing -------------------------------------------------------------------------
-
-    fn watchlist(&mut self, ui: &mut Ui) -> Vec<Action> {
-        let mut out = Vec::new();
-        ui.add(
-            egui::Label::new(
-                RichText::new("SECURITY             LAST       CHG    CHG%")
-                    .font(mono(11.5))
-                    .color(amber())
-                    .background_color(theme::header()),
-            )
-            .extend(),
-        );
-        let mut remove = None;
-        for s in &self.watchlist {
-            ui.horizontal(|ui| {
-                let sec = tr_data::security(s);
-                let label = format!("{:<8} {:<6}", sec.ticker, sec.class.yellow_key().label());
-                let r = ui.add(
-                    egui::Label::new(RichText::new(label).font(mono(12.5)).color(amber()))
-                        .extend()
-                        .sense(egui::Sense::click()),
-                );
-                if r.clicked() {
-                    out.push(Action::OpenChart(s.clone()));
-                }
-                if r.secondary_clicked() {
-                    remove = Some(s.clone());
-                }
-                match self.quotes.get(s) {
-                    Some(q) => {
-                        let c = if q.change() >= 0.0 { theme::up() } else { theme::down() };
-                        let d = sec.decimals(q.last);
-                        let text = format!(
-                            "{:>11.d$} {:>9} {:>+7.2}%",
-                            q.last,
-                            markets_view::change_text(&sec, q),
-                            q.change_pct()
-                        );
-                        ui.add(egui::Label::new(RichText::new(text).font(mono(12.5)).color(c)).extend());
-                    }
-                    None => {
-                        ui.label(RichText::new("       …").font(mono(12.5)).color(muted()));
-                    }
-                }
-            });
+    fn hotkey_applies(&self, a: prefs::Action) -> bool {
+        use prefs::Action as A;
+        match a {
+            A::DrawTrendline
+            | A::DrawHorizontal
+            | A::DrawVertical
+            | A::DrawFib
+            | A::ResetView
+            | A::LogScale
+            | A::Magnet => self.focused_is_chart(),
+            a => a.layout_slot().is_none_or(|i| i < self.layout_names.len()),
         }
-        if let Some(s) = remove {
-            self.watchlist.retain(|x| *x != s);
-        }
-        ui.label(
-            RichText::new("WL ADD <KEY> (e.g. WL ADD SOLUSD CRNCY) · right-click to remove · click to chart")
-                .font(mono(10.5))
-                .color(muted()),
-        );
-        out
     }
 
-    fn help(ui: &mut Ui) {
-        const HELP: &str = "\
-COMMAND LINE  <SECURITY> [<FUNCTION>] <GO>   (Enter = <GO>; type anywhere to start)
-  Market keys: AAPL <EQUITY> · SPY <EQUITY> · SPX <INDEX> · BTCUSD <CRNCY> · EURUSD <CRNCY>
-               US10Y <GOVT> · CL1 <CMDTY> · GC1 <CMDTY>   (the key is optional for known tickers)
-  Typing shows matches across all asset classes: ↑/↓ select, Tab complete, Enter load.
-  WEI                  world markets overview     GC  US Treasury yield curve
-  SECF <query>         security search (e.g. SECF gold cmdty, SECF yen)
-  Crypto charts update live (Binance websocket; Coinbase fallback).
-  1 5 15 30 1H 4H D 1W 1M   interval (1m..1 month)      1D 5D 3M 6M YTD 1Y 5Y ALL  ranges
-  CANDLE BAR LINE AREA chart type                       LOG  log scale
-  SMA 20  EMA 50  VWAP  BB 20 2  RSI 14  MACD 12 26 9   toggle indicators (CLEAR)
-  CMP MSFT             compare (rebased to the main symbol; CMP alone removes)
-  TL  HL  VL  FIB      trendline / horizontal / vertical / fib retracement (CLEAR DRAW)
-  MAGNET               snap drawings to OHLC
-
-CONGRESS (STOCK Act PTRs from Senate eFD + House Clerk, refreshed hourly)
-  CONG                 latest trades feed           NVDA CONG   who in Congress traded NVDA
-  POL                  politician directory          POL PELOSI  profile + est. performance
-  TRACK PELOSI         alert on new filings          UNTRACK PELOSI
-  ALERTS               alerts list                   REFRESH     ingest now
-  Chart markers: B/S circles at transaction dates, blue = D, red = R, purple = I.
-  Hover a marker for the politician, amount, filed date and disclosure lag.
-
-LAYOUT / PANES
-  LAYOUT 1|2|2H|3|4|6   NEW   CLOSE   TAB / SHIFT+TAB cycle focus   W  watchlist (WL ADD X)
-
-CHART HOTKEYS (focused chart)
-  wheel zoom · drag pan · drag price axis stretch · drag time axis zoom · double-click reset
-  ←/→ pan · Ctrl/Cmd+↑/↓ or +/- zoom · Alt+R reset · Alt+L log · Alt+M magnet
-  Alt+T trendline · Alt+H horizontal · Alt+V vertical · Alt+F fib · Esc cancel · Del remove
-  F12 frame-time readout (UI CPU ms, frame interval, fps)
-
-DATA  crypto: Binance/Coinbase · yields: Treasury.gov (FRED) · FX/indices/futures/ETFs/stocks: Yahoo
-      (Alpaca for stocks with APCA_API_KEY_ID/APCA_API_SECRET_KEY) · TR_PROVIDER=sample offline.";
-        egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-            ui.label(RichText::new(HELP).font(mono(12.0)).color(text()));
-        });
+    fn run_hotkey(&mut self, a: prefs::Action) {
+        use prefs::Action as A;
+        match a {
+            A::Help => self.apply(Function::Help),
+            A::Congress => self.apply(Function::Congress),
+            A::Politicians => self.apply(Function::Politician(String::new())),
+            A::Alerts => self.apply(Function::Alerts),
+            A::Watchlist => self.apply(Function::Watchlist),
+            A::Refresh => self.apply(Function::Refresh),
+            A::FrameTiming => self.show_perf = !self.show_perf,
+            A::NextPane => self.cycle_focus(1),
+            A::PrevPane => self.cycle_focus(-1),
+            A::ToggleSidebar => self.sidebar_open = !self.sidebar_open,
+            A::SplitRight => self.apply(Function::Split { down: false, panel: String::new() }),
+            A::SplitDown => self.apply(Function::Split { down: true, panel: String::new() }),
+            A::NewTab => {
+                let target = self.focused_visible();
+                let kind = self.panel_from_spec("", None).expect("chart");
+                let id = self.new_pane(kind);
+                self.dock_pane(id, target, crate::dock::Zone::Center);
+            }
+            A::ClosePane => self.close_pane(self.focus),
+            A::PopOut => self.pop_out(self.focus),
+            A::SaveLayout => {
+                self.save_layout();
+                self.status = format!("Saved layout {:?}", self.layout_name);
+            }
+            A::Settings => self.apply(Function::Settings),
+            A::DrawTrendline => self.with_chart(|c, _| c.start_tool(Tool::Trendline)),
+            A::DrawHorizontal => self.with_chart(|c, _| c.start_tool(Tool::Horizontal)),
+            A::DrawVertical => self.with_chart(|c, _| c.start_tool(Tool::Vertical)),
+            A::DrawFib => self.with_chart(|c, _| c.start_tool(Tool::Fib)),
+            A::ResetView => self.with_chart(|c, _| c.reset_view()),
+            A::LogScale => self.with_chart(|c, _| c.log = !c.log),
+            A::Magnet => self.with_chart(|c, _| c.magnet = !c.magnet),
+            a => {
+                if let Some(name) = a.layout_slot().and_then(|i| self.layout_names.get(i)).cloned() {
+                    self.switch_layout(&name);
+                }
+            }
+        }
     }
 
     fn periodic(&mut self) {
-        let visible_wl = self.sidebar_open || self.panes.iter().any(|p| matches!(p.kind, PaneKind::Watchlist));
+        let visible = self.visible_panes();
+        let shown = |f: &dyn Fn(&PaneKind) -> bool| visible.iter().any(|&i| f(&self.panes[i].kind));
+        let visible_wl = self.sidebar_open || shown(&|k| matches!(k, PaneKind::Watchlist));
         if visible_wl && self.last_quotes.is_none_or(|t| t.elapsed() > Duration::from_secs(20)) {
             self.worker.send(Request::Quotes(self.watchlist.clone()));
             self.last_quotes = Some(Instant::now());
         }
-        let visible = |f: fn(&PaneKind) -> bool| self.panes.iter().any(|p| f(&p.kind));
-        if visible(|k| matches!(k, PaneKind::Wei))
-            && self.last_wei.is_none_or(|t| t.elapsed() > Duration::from_secs(20))
+        if shown(&|k| matches!(k, PaneKind::Wei)) && self.last_wei.is_none_or(|t| t.elapsed() > Duration::from_secs(20))
         {
             self.worker.send(Request::Quotes(markets_view::overview_keys()));
             self.last_wei = Some(Instant::now());
         }
-        if visible(|k| matches!(k, PaneKind::Curve))
+        if shown(&|k| matches!(k, PaneKind::Curve))
             && self.last_curve.is_none_or(|t| t.elapsed() > Duration::from_secs(600))
         {
             self.worker.send(Request::YieldCurves);
             self.last_curve = Some(Instant::now());
+        }
+        // News every 5 minutes and order books every second, while visible.
+        for &i in &visible {
+            let p = &mut self.panes[i];
+            match &mut p.kind {
+                PaneKind::News(n) if n.fetched.is_none_or(|t| t.elapsed() > Duration::from_secs(300)) => {
+                    n.fetched = Some(Instant::now());
+                    self.worker.send(Request::News { pane: p.id, symbol: n.symbol.clone() });
+                }
+                PaneKind::OrderBook(b) if b.fetched.is_none_or(|t| t.elapsed() > Duration::from_millis(1000)) => {
+                    b.fetched = Some(Instant::now());
+                    self.worker.send(Request::OrderBook { pane: p.id, symbol: b.symbol.clone(), depth: b.depth });
+                }
+                _ => {}
+            }
         }
         if let Some((q, at)) = &self.search_pending
             && at.elapsed() > Duration::from_millis(300)
@@ -948,20 +1065,29 @@ DATA  crypto: Binance/Coinbase · yields: Treasury.gov (FRED) · FX/indices/futu
             self.worker.send(Request::Latest { limit: 2_000 });
             self.last_feed = Some(Instant::now());
         }
-        if self.last_save.elapsed() > Duration::from_secs(20) {
-            self.save_settings();
+        if self.last_save.elapsed() > Duration::from_secs(10) {
+            self.autosave();
             self.last_save = Instant::now();
         }
         self.toasts.retain(|(_, t)| t.elapsed() < Duration::from_secs(10));
+    }
+
+    /// Save the active layout (only when it changed) and app settings.
+    fn autosave(&mut self) {
+        let json = self.current_doc().to_json();
+        if json != self.last_saved {
+            self.save_layout();
+        }
+        self.save_settings();
     }
 }
 
 /// Apply the native macOS window chrome (unified toolbar, inset traffic lights, sidebar
 /// vibrancy). Returns whether the window is now translucent.
 #[cfg(target_os = "macos")]
-fn style_native_window(frame: &eframe::Frame) -> bool {
+fn style_native_window(frame: &eframe::Frame, vibrancy: bool) -> bool {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    let vibrancy = std::env::var("TR_VIBRANCY").map_or(true, |v| v != "0");
+    let vibrancy = vibrancy && std::env::var("TR_VIBRANCY").map_or(true, |v| v != "0");
     let Ok(handle) = frame.window_handle() else { return false };
     let RawWindowHandle::AppKit(h) = handle.as_raw() else { return false };
     // SAFETY: called on the main thread (eframe runs `ui` there) with a live NSView.
@@ -971,7 +1097,7 @@ fn style_native_window(frame: &eframe::Frame) -> bool {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn style_native_window(_frame: &eframe::Frame) -> bool {
+fn style_native_window(_frame: &eframe::Frame, _vibrancy: bool) -> bool {
     false
 }
 
@@ -987,20 +1113,23 @@ impl eframe::App for TerminalApp {
             self.perf_dt_ms = if self.perf_dt_ms == 0.0 { dt } else { self.perf_dt_ms * 0.9 + dt * 0.1 };
         }
         let ctx = ui.ctx().clone();
-        self.drain();
-        self.periodic();
-
         if !self.window_styled {
             self.window_styled = true;
-            self.vibrancy = style_native_window(frame);
+            self.vibrancy = style_native_window(frame, self.prefs.appearance.vibrancy);
         }
         if self.last_accent_poll.is_none_or(|t| t.elapsed() > Duration::from_secs(3)) {
             if let Some([r, g, b]) = tr_macos::accent_color() {
-                self.accent = Color32::from_rgb(r, g, b);
+                self.system_accent = Color32::from_rgb(r, g, b);
             }
             self.last_accent_poll = Some(Instant::now());
         }
-        theme::refresh(&ctx, self.accent);
+        if self.applied_appearance.as_ref() != Some(&self.prefs.appearance) {
+            theme::configure(&ctx, &self.prefs.appearance, self.system_accent);
+            self.applied_appearance = Some(self.prefs.appearance.clone());
+        }
+        theme::refresh(&ctx, &self.prefs.appearance, self.system_accent);
+        self.drain();
+        self.periodic();
 
         let screen = ui.max_rect();
         let open = anim::spring_with(
@@ -1015,9 +1144,10 @@ impl eframe::App for TerminalApp {
         ui.painter().rect_filled(main, 0.0, theme::window());
         let toolbar = Rect::from_min_size(main.min, vec2(main.width(), TOOLBAR_H));
         let status = Rect::from_min_max(pos2(main.left(), main.bottom() - STATUS_H), main.max);
+        let gap = theme::dp(6.0);
         let area = Rect::from_min_max(
-            pos2(main.left() + GAP, toolbar.bottom() + GAP),
-            pos2(main.right() - GAP, status.top() - GAP * 0.5),
+            pos2(main.left() + gap, toolbar.bottom() + gap),
+            pos2(main.right() - gap, status.top() - gap * 0.5),
         );
 
         self.hotkeys(&ctx);
@@ -1034,92 +1164,16 @@ impl eframe::App for TerminalApp {
         self.toolbar(ui, toolbar, (TRAFFIC_INSET - sb_w).max(0.0));
         self.status_bar(ui, status);
 
-        let rects = self.layout.rects(area, GAP);
         let mut actions = Vec::new();
         for c in sidebar_cmds {
             match c {
                 SidebarCmd::Action(a) => actions.push(a),
                 SidebarCmd::Function(f) => self.apply(f),
+                SidebarCmd::Layout(op) => self.layout_op(op),
             }
         }
-        let mut new_focus = None;
-        for (i, rect) in rects.into_iter().enumerate() {
-            let focused = i == self.focus;
-            let Some(pane) = self.panes.get_mut(i) else { break };
-            match &mut pane.kind {
-                PaneKind::Chart(c) => {
-                    if c.show(ui, rect, focused, &self.worker) {
-                        new_focus = Some(i);
-                    }
-                    actions.append(&mut c.actions);
-                }
-                kind => {
-                    let title = kind.title();
-                    let inner = Self::pane_card(ui, rect, &title, focused, pane.id);
-                    let mut child = ui.new_child(UiBuilder::new().max_rect(inner).id_salt(("pane", pane.id)));
-                    child.set_clip_rect(inner);
-                    match kind {
-                        PaneKind::Feed => actions.extend(congress_view::feed(
-                            &mut child,
-                            &self.latest,
-                            &mut self.feed_filter,
-                            &self.congress_status,
-                        )),
-                        PaneKind::Ticker { symbol, trades, loading } => {
-                            if *loading {
-                                child.label(RichText::new("Loading…").color(muted()));
-                            } else {
-                                actions.extend(congress_view::ticker_trades(&mut child, symbol, trades));
-                            }
-                        }
-                        PaneKind::Profile { query, data, loading } => {
-                            actions.extend(congress_view::profile(&mut child, query, data.as_deref(), *loading))
-                        }
-                        PaneKind::Politicians => actions.extend(congress_view::politicians(
-                            &mut child,
-                            &self.politicians,
-                            &mut self.pol_search,
-                        )),
-                        PaneKind::Alerts => {
-                            let (a, seen) = congress_view::alerts(&mut child, &self.alerts);
-                            actions.extend(a);
-                            if seen {
-                                self.worker.send(Request::MarkAlertsSeen);
-                            }
-                        }
-                        PaneKind::Watchlist => {}
-                        PaneKind::Help => Self::help(&mut child),
-                        PaneKind::Wei => {
-                            actions.extend(markets_view::wei(&mut child, &self.quotes, self.wei_updated.as_deref()))
-                        }
-                        PaneKind::Curve => actions.extend(markets_view::curve(&mut child, self.curves.as_deref())),
-                        PaneKind::Search { query } => {
-                            let hits = if self.net_hits.0 == *query { self.net_hits.1.as_slice() } else { &[] };
-                            let (a, changed) = markets_view::search(&mut child, query, hits);
-                            actions.extend(a);
-                            if changed && query.trim().len() >= 2 {
-                                self.search_pending = Some((query.clone(), Instant::now()));
-                            }
-                        }
-                        PaneKind::Chart(_) => unreachable!(),
-                    }
-                    if matches!(pane.kind, PaneKind::Watchlist) {
-                        let mut child = ui.new_child(UiBuilder::new().max_rect(inner).id_salt(("wl", pane.id)));
-                        let wl = self.watchlist(&mut child);
-                        actions.extend(wl);
-                    }
-                    let clicked = ui.input(|inp| {
-                        inp.pointer.primary_pressed() && inp.pointer.interact_pos().is_some_and(|p| rect.contains(p))
-                    });
-                    if clicked {
-                        new_focus = Some(i);
-                    }
-                }
-            }
-        }
-        if let Some(f) = new_focus {
-            self.focus = f;
-        }
+        actions.extend(self.render_dock(ui, area, gap));
+        actions.extend(self.render_windows(&ctx));
         self.run_actions(actions);
         self.toasts(&ctx);
 
@@ -1129,13 +1183,14 @@ impl eframe::App for TerminalApp {
             if !self.smoke_done && self.started.elapsed().as_secs_f64() > secs {
                 self.smoke_done = true;
                 tracing::info!(
-                    "smoke: {} frames in {:.1}s, ui cpu {:.2} ms/frame, panes {}",
+                    "smoke: {} frames in {:.1}s, ui cpu {:.2} ms/frame, panes {}, layout {:?}",
                     ctx.cumulative_frame_nr(),
                     self.started.elapsed().as_secs_f64(),
                     self.perf_cpu_ms,
-                    self.panes.len()
+                    self.panes.len(),
+                    self.layout_name
                 );
-                self.save_settings();
+                self.autosave();
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
@@ -1153,6 +1208,46 @@ impl eframe::App for TerminalApp {
     }
 
     fn on_exit(&mut self) {
-        self.save_settings();
+        self.autosave();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_settings_migrate_to_a_layout() {
+        let old = r#"{"layout":"MainRight2","watchlist":["AAPL","BTCUSD Curncy"],"sidebar":false,
+            "panes":[{"Chart":{"symbol":"NVDA","tf":"D1","chart_type":"Candles","log":false,"indicators":[],
+            "drawings":[],"compare":null}},"Feed","Wei"]}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        assert!(!s.sidebar);
+        let doc = migrate_legacy(&s, &prefs::PanelDefaults::default()).unwrap();
+        assert_eq!(doc.panes.len(), 3);
+        assert_eq!(doc.dock.visible(), vec![1, 2, 3]);
+        assert!(matches!(&doc.panes[0].settings, PaneSettings::Chart { symbol, .. } if symbol == "NVDA"));
+        assert_eq!(doc.panes[1].settings, PaneSettings::Feed(None));
+        // New-format files carry no legacy fields and are not migrated.
+        let new: Settings = serde_json::from_str(r#"{"watchlist":[],"active_layout":"Desk"}"#).unwrap();
+        assert!(migrate_legacy(&new, &prefs::PanelDefaults::default()).is_none());
+        assert_eq!(new.active_layout.as_deref(), Some("Desk"));
+    }
+
+    #[test]
+    fn pane_settings_round_trip_through_kinds() {
+        let d = prefs::PanelDefaults::default();
+        for s in [
+            crate::layouts::chart_settings("BTCUSD Curncy", &d),
+            PaneSettings::Feed(Some(crate::layouts::FeedSettings { buys: Some(true), ..Default::default() })),
+            PaneSettings::News(Some("AAPL US Equity".into())),
+            PaneSettings::News(None),
+            PaneSettings::OrderBook { symbol: "ETHUSD Curncy".into(), depth: 50, group: 1.0 },
+            PaneSettings::Search("gold".into()),
+            PaneSettings::Settings,
+            PaneSettings::Wei,
+        ] {
+            assert_eq!(PaneKind::from_settings(s.clone()).settings(), s);
+        }
     }
 }

@@ -15,7 +15,7 @@ use crate::alpaca::AlpacaProvider;
 use crate::crypto::CryptoProvider;
 use crate::treasury::TreasuryProvider;
 use crate::yahoo::{YahooProvider, yahoo_symbol};
-use crate::{LiveFeed, MarketData, Quote, SearchHit, YieldCurves, security};
+use crate::{LiveFeed, MarketData, NewsItem, OrderBook, Quote, SearchHit, YieldCurves, security};
 
 pub struct Markets {
     yahoo: YahooProvider,
@@ -116,6 +116,27 @@ impl MarketData for Markets {
 
     async fn search(&self, query: &str) -> Result<Vec<SearchHit>> {
         self.yahoo.search(query).await
+    }
+
+    async fn news(&self, symbol: Option<&str>) -> Result<Vec<NewsItem>> {
+        let q = match symbol.map(security) {
+            Some(sec) => match sec.class {
+                // Yahoo has no crypto headlines; use CoinDesk's feed.
+                AssetClass::Crypto => return self.crypto.news(&sec).await,
+                AssetClass::Govt => catalog::by_security(&sec).and_then(|l| l.yahoo).unwrap_or("^TNX").to_string(),
+                _ => yahoo_symbol(&sec),
+            },
+            None => "stock market".into(),
+        };
+        self.yahoo.news(&q).await
+    }
+
+    async fn order_book(&self, symbol: &str, depth: usize) -> Result<OrderBook> {
+        let sec = security(symbol);
+        match sec.class {
+            AssetClass::Crypto => self.crypto.order_book(symbol, &sec, depth).await,
+            _ => bail!("no free public order book for {}", sec.key()),
+        }
     }
 
     async fn yield_curves(&self) -> Result<YieldCurves> {

@@ -78,4 +78,18 @@ mod markets {
         let bar = tokio::time::timeout(Duration::from_secs(20), feed.recv()).await.expect("live tick").unwrap();
         assert!(bar.close > 1000.0);
     }
+
+    #[tokio::test]
+    #[ignore = "network"]
+    async fn news_and_order_books() {
+        let m = m();
+        for key in [Some("AAPL US Equity"), Some("BTCUSD Curncy"), None] {
+            let n = m.news(key).await.unwrap();
+            assert!(!n.is_empty(), "news for {key:?}");
+        }
+        let b = m.order_book("BTCUSD Curncy", 20).await.unwrap();
+        assert_eq!(b.bids.len(), 20);
+        assert!(b.bids[0].0 < b.asks[0].0 && !b.simulated);
+        assert!(m.order_book("AAPL US Equity", 20).await.is_err());
+    }
 }

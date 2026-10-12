@@ -76,6 +76,10 @@ pub enum Icon {
     People,
     List,
     Star,
+    Grid,
+    Plus,
+    More,
+    Gear,
 }
 
 /// Draw a simple line icon centred in `r`.
@@ -160,6 +164,31 @@ pub fn draw_icon(p: &egui::Painter, r: Rect, icon: Icon, color: Color32) {
                 p.circle_filled(pt(-5.0, y), 1.0 * u, color);
                 p.line_segment([pt(-2.5, y), pt(6.0, y)], s);
             }
+        }
+        Icon::Grid => {
+            for (x, y) in [(-3.5, -3.5), (3.5, -3.5), (-3.5, 3.5), (3.5, 3.5)] {
+                p.rect_stroke(Rect::from_center_size(pt(x, y), vec2(5.0 * u, 5.0 * u)), 1.5, s, StrokeKind::Middle);
+            }
+        }
+        Icon::Plus => {
+            p.line_segment([pt(-5.0, 0.0), pt(5.0, 0.0)], s);
+            p.line_segment([pt(0.0, -5.0), pt(0.0, 5.0)], s);
+        }
+        Icon::More => {
+            for x in [-4.5, 0.0, 4.5] {
+                p.circle_filled(pt(x, 0.0), 1.3 * u, color);
+            }
+        }
+        Icon::Gear => {
+            p.circle_stroke(c, 2.5 * u, s);
+            for k in 0..8 {
+                let a = k as f32 * std::f32::consts::FRAC_PI_4;
+                p.line_segment(
+                    [pt(4.2 * a.cos(), 4.2 * a.sin()), pt(6.2 * a.cos(), 6.2 * a.sin())],
+                    Stroke::new(1.8, color),
+                );
+            }
+            p.circle_stroke(c, 4.6 * u, s);
         }
         Icon::Star => {
             let pts: Vec<Pos2> = (0..=10)

@@ -24,8 +24,6 @@ pub const TOOLBAR_H: f32 = if cfg!(target_os = "macos") { tr_macos::TITLEBAR_HEI
 pub const TRAFFIC_INSET: f32 = if cfg!(target_os = "macos") { tr_macos::TRAFFIC_LIGHTS_WIDTH } else { 0.0 };
 pub const STATUS_H: f32 = 24.0;
 pub const SIDEBAR_W: f32 = 232.0;
-pub const PANE_TITLE_H: f32 = 26.0;
-pub const GAP: f32 = 6.0;
 const ROW_H: f32 = 24.0;
 const MAC: bool = cfg!(target_os = "macos");
 
@@ -33,6 +31,7 @@ const MAC: bool = cfg!(target_os = "macos");
 pub enum SidebarCmd {
     Action(Action),
     Function(Function),
+    Layout(super::workspace::LayoutOp),
 }
 
 /// Make `rect` behave like a title bar: drag moves the window, double-click zooms it.
@@ -132,10 +131,9 @@ impl TerminalApp {
             right -= seg_w;
             let r = Rect::from_min_size(pos2(right, cy - 12.0), vec2(seg_w, 24.0));
             let mut s = ui.new_child(UiBuilder::new().max_rect(r));
-            let sel = Layout::ALL.iter().position(|l| *l == self.layout);
+            let sel = self.preset.and_then(|p| Layout::ALL.iter().position(|l| *l == p));
             if let Some(i) = widgets::segmented(&mut s, "layout", &labels, sel, 24.0) {
-                self.layout = Layout::ALL[i];
-                self.fit_panes_to_layout();
+                self.apply_preset(Layout::ALL[i]);
             }
             s.interact(r, Id::new("layout-tip"), Sense::hover()).on_hover_text("Pane layout (LAYOUT 1|2|2H|3|4|6)");
             right -= 12.0;
@@ -263,7 +261,7 @@ impl TerminalApp {
             self.cmd_hist_pos = None;
             // The command line stays live, Bloomberg-style.
             self.focus_cmd = true;
-        } else if (focused || resp.lost_focus()) && esc {
+        } else if had_focus && esc {
             self.cmd.clear();
             resp.surrender_focus();
         } else if focused && (up || down) && !self.cmd_history.is_empty() {
@@ -390,7 +388,7 @@ impl TerminalApp {
         child.set_clip_rect(body.intersect(ui.clip_rect()));
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(&mut child, |ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
-            let focused = self.panes.get(self.focus).map(|p| std::mem::discriminant(&p.kind));
+            let focused = self.idx(self.focus).map(|i| std::mem::discriminant(&self.panes[i].kind));
             let is_focused = |k: &PaneKind| focused == Some(std::mem::discriminant(k));
 
             section(ui, "Watchlist");
@@ -476,7 +474,15 @@ impl TerminalApp {
 
             section(ui, "Congress");
             let unread = self.alerts.iter().filter(|a| !a.seen).count();
-            if nav_row(ui, Icon::List, "Latest Trades", Some("CONG"), is_focused(&PaneKind::Feed)).clicked() {
+            if nav_row(
+                ui,
+                Icon::List,
+                "Latest Trades",
+                Some("CONG"),
+                is_focused(&PaneKind::Feed { filter: Default::default() }),
+            )
+            .clicked()
+            {
                 out.push(SidebarCmd::Function(Function::Congress));
             }
             if nav_row(ui, Icon::People, "Politicians", Some("POL"), is_focused(&PaneKind::Politicians)).clicked() {
@@ -521,8 +527,13 @@ impl TerminalApp {
                 }
             }
 
-            section(ui, "Help");
-            if nav_row(ui, Icon::Star, "Commands & Hotkeys", Some("F1"), is_focused(&PaneKind::Help)).clicked() {
+            self.sidebar_layouts(ui, &mut out);
+
+            section(ui, "More");
+            if nav_row(ui, Icon::Gear, "Settings", Some("PDF"), is_focused(&PaneKind::Settings)).clicked() {
+                out.push(SidebarCmd::Function(Function::Settings));
+            }
+            if nav_row(ui, Icon::Star, "Commands & Hotkeys", Some("HELP"), is_focused(&PaneKind::Help)).clicked() {
                 out.push(SidebarCmd::Function(Function::Help));
             }
             ui.add_space(12.0);
@@ -530,29 +541,78 @@ impl TerminalApp {
         out
     }
 
-    // ---- panes and status ----------------------------------------------------------------
+    // ---- layouts and status --------------------------------------------------------------
 
-    /// Rounded card with a title row; returns the content rect.
-    pub(super) fn pane_card(ui: &Ui, rect: Rect, title: &str, focused: bool, id: u64) -> Rect {
-        let focus = anim::spring_bool(ui.ctx(), Id::new(("pane-focus", id)), focused);
-        let inner = widgets::card(ui, rect, focus);
-        let p = ui.painter_at(rect);
-        let bar = Rect::from_min_size(inner.min, vec2(inner.width(), PANE_TITLE_H));
-        let (code, rest) = title.split_once("  ").unwrap_or(("", title));
-        let mut x = bar.left() + 10.0;
-        if !code.is_empty() {
-            let g = p.layout_no_wrap(code.to_string(), mono(11.0), amber());
-            let chip = Rect::from_min_size(pos2(x, bar.center().y - 8.0), vec2(g.size().x + 10.0, 16.0));
-            p.rect_filled(chip, 4.0, theme::amber().gamma_multiply(0.14));
-            p.galley(pos2(x + 5.0, bar.center().y - g.size().y / 2.0), g, amber());
-            x = chip.right() + 8.0;
+    /// Saved layouts: click to switch, double-click or context menu to rename, ⌘1…⌘9 hints.
+    fn sidebar_layouts(&mut self, ui: &mut Ui, out: &mut Vec<SidebarCmd>) {
+        use super::workspace::LayoutOp;
+        ui.horizontal(|ui| {
+            section(ui, "Layouts");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add(egui::Button::new(RichText::new("+").font(ui_font(14.0)).color(muted())).frame(false))
+                    .on_hover_text("New layout")
+                    .clicked()
+                {
+                    out.push(SidebarCmd::Layout(LayoutOp::New(None)));
+                }
+            });
+        });
+        let slots: Vec<crate::prefs::Action> =
+            crate::prefs::Action::ALL.iter().copied().filter(|a| a.layout_slot().is_some()).collect();
+        for (i, name) in self.layout_names.clone().iter().enumerate() {
+            let current = name.eq_ignore_ascii_case(&self.layout_name);
+            if let Some((old, buf)) = &mut self.renaming_layout
+                && old == name
+            {
+                let r = ui.add(egui::TextEdit::singleline(buf).font(ui_font(12.5)).desired_width(f32::INFINITY));
+                r.request_focus();
+                if r.lost_focus() {
+                    let commit = !ui.input(|i| i.key_pressed(Key::Escape)) && !buf.trim().is_empty() && buf != old;
+                    if commit {
+                        out.push(SidebarCmd::Layout(LayoutOp::Rename(old.clone(), buf.trim().to_string())));
+                    }
+                    self.renaming_layout = None;
+                }
+                continue;
+            }
+            let hint = slots.get(i).and_then(|a| self.prefs.hotkeys.chord(*a)).map(|c| c.display());
+            let resp = nav_row(ui, Icon::Grid, name, hint.as_deref(), current);
+            if resp.clicked() && !current {
+                out.push(SidebarCmd::Layout(LayoutOp::Switch(name.clone())));
+            }
+            if resp.double_clicked() {
+                self.renaming_layout = Some((name.clone(), name.clone()));
+            }
+            resp.context_menu(|ui| {
+                if !current && ui.button("Switch To").clicked() {
+                    out.push(SidebarCmd::Layout(LayoutOp::Switch(name.clone())));
+                    ui.close();
+                }
+                if ui.button("Rename…").clicked() {
+                    self.renaming_layout = Some((name.clone(), name.clone()));
+                    ui.close();
+                }
+                if ui.button("Duplicate").clicked() {
+                    out.push(SidebarCmd::Layout(LayoutOp::Duplicate(name.clone(), None)));
+                    ui.close();
+                }
+                if ui.button("Export to Downloads").clicked() {
+                    out.push(SidebarCmd::Layout(LayoutOp::Export(name.clone(), None)));
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Delete").clicked() {
+                    out.push(SidebarCmd::Layout(LayoutOp::Delete(name.clone())));
+                    ui.close();
+                }
+            });
         }
-        p.text(pos2(x, bar.center().y), Align2::LEFT_CENTER, rest, ui_font(12.5), text());
-        p.hline(bar.x_range(), bar.bottom(), Stroke::new(1.0, theme::border()));
-        Rect::from_min_max(
-            pos2(inner.left() + 8.0, bar.bottom() + 4.0),
-            pos2(inner.right() - 8.0, inner.bottom() - 4.0),
-        )
+        if nav_row(ui, Icon::Plus, "Save Current As New…", None, false).clicked() {
+            let name = self.store.unique_name(&format!("{} copy", self.layout_name));
+            out.push(SidebarCmd::Layout(LayoutOp::SaveAs(name.clone())));
+            self.renaming_layout = Some((name.clone(), name));
+        }
     }
 
     pub(super) fn status_bar(&self, ui: &Ui, rect: Rect) {
@@ -561,17 +621,24 @@ impl TerminalApp {
         let cy = rect.center().y;
         let mut x = rect.left() + 10.0;
         if self.cmd.trim().is_empty() {
-            let keys = [
-                ("F1", "Help"),
-                ("F2", "Congress"),
-                ("F3", "Politicians"),
-                ("F4", "Alerts"),
-                ("F5", "Watchlist"),
-                ("Tab", "Next Pane"),
-                (if MAC { "⌥T H V F" } else { "Alt+T H V F" }, "Draw"),
-                (if MAC { "⌥R" } else { "Alt+R" }, "Reset"),
-            ];
+            use crate::prefs::Action as A;
+            let keys: Vec<(String, &str)> = [
+                (A::Help, "Help"),
+                (A::Congress, "Congress"),
+                (A::Watchlist, "Watchlist"),
+                (A::NextPane, "Next Pane"),
+                (A::SplitRight, "Split"),
+                (A::PopOut, "Pop Out"),
+                (A::SaveLayout, "Save Layout"),
+                (A::Settings, "Settings"),
+            ]
+            .into_iter()
+            .filter_map(|(a, l)| Some((self.prefs.hotkeys.chord(a)?.display(), l)))
+            .collect();
             for (k, label) in keys {
+                if x > rect.center().x {
+                    break;
+                }
                 let g = p.layout_no_wrap(k.to_string(), mono(10.0), text());
                 let cap = Rect::from_min_size(pos2(x, cy - 8.0), vec2(g.size().x + 8.0, 16.0));
                 p.rect_filled(cap, 4.0, theme::control());
@@ -630,7 +697,7 @@ fn section(ui: &mut Ui, label: &str) {
 
 /// A full-width clickable sidebar row with hover wash; the caller paints its content.
 fn row_frame(ui: &mut Ui, selected: bool) -> egui::Response {
-    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click());
+    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), theme::dp(ROW_H)), Sense::click());
     widgets::hover_wash(ui, r, &resp, selected);
     if resp.hovered() {
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);

@@ -16,6 +16,7 @@ pub mod alpaca;
 pub mod cache;
 pub mod crypto;
 pub mod markets;
+pub mod rss;
 pub mod sample;
 pub mod treasury;
 pub mod yahoo;
@@ -79,6 +80,63 @@ pub struct YieldCurves {
     pub year_ago: Option<YieldCurve>,
 }
 
+/// A news headline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NewsItem {
+    pub title: String,
+    pub publisher: String,
+    pub link: String,
+    /// Publication time (Unix seconds).
+    pub ts: i64,
+    /// Related tickers as reported by the source.
+    #[serde(default)]
+    pub tickers: Vec<String>,
+}
+
+/// One side's price level: (price, size).
+pub type Level = (f64, f64);
+
+/// Top of the order book: bids descending, asks ascending.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrderBook {
+    pub symbol: String,
+    pub bids: Vec<Level>,
+    pub asks: Vec<Level>,
+    /// Venue the book came from (e.g. "Binance").
+    pub source: String,
+    /// True when the book is synthetic (sample mode or no public book for this market).
+    pub simulated: bool,
+}
+
+impl OrderBook {
+    pub fn mid(&self) -> Option<f64> {
+        Some((self.bids.first()?.0 + self.asks.first()?.0) / 2.0)
+    }
+
+    pub fn spread(&self) -> Option<f64> {
+        Some(self.asks.first()?.0 - self.bids.first()?.0)
+    }
+
+    /// Bucket levels to multiples of `tick` (bids round down, asks up), summing sizes.
+    pub fn grouped(&self, tick: f64) -> OrderBook {
+        if tick <= 0.0 {
+            return self.clone();
+        }
+        let group = |levels: &[Level], up: bool| {
+            let mut out: Vec<Level> = Vec::new();
+            for &(p, q) in levels {
+                let b = if up { (p / tick).ceil() } else { (p / tick).floor() } * tick;
+                match out.last_mut() {
+                    Some(last) if (last.0 - b).abs() < tick * 1e-6 => last.1 += q,
+                    _ => out.push((b, q)),
+                }
+            }
+            out
+        };
+        OrderBook { bids: group(&self.bids, false), asks: group(&self.asks, true), ..self.clone() }
+    }
+}
+
 /// Live bar updates for one symbol and timeframe: each message is the latest state of
 /// the current (possibly still forming) bar. The feed stops when the receiver is dropped.
 pub type LiveFeed = mpsc::Receiver<Bar>;
@@ -134,6 +192,16 @@ pub trait MarketData: Send + Sync {
     /// Search securities beyond the built-in catalog (network sources).
     async fn search(&self, _query: &str) -> Result<Vec<SearchHit>> {
         Ok(Vec::new())
+    }
+
+    /// Recent headlines for a market key, or general market news for `None`.
+    async fn news(&self, _symbol: Option<&str>) -> Result<Vec<NewsItem>> {
+        Ok(Vec::new())
+    }
+
+    /// Top `depth` levels of the order book, where a public book exists.
+    async fn order_book(&self, symbol: &str, _depth: usize) -> Result<OrderBook> {
+        anyhow::bail!("no public order book for {symbol}")
     }
 
     /// The US Treasury curve. The default assembles it from each tenor's daily history.
@@ -224,6 +292,21 @@ impl<P: MarketData> MarketData for Fallback<P> {
         self.primary.search(query).await
     }
 
+    async fn news(&self, symbol: Option<&str>) -> Result<Vec<NewsItem>> {
+        self.primary.news(symbol).await
+    }
+
+    /// Real books where the venue publishes one; otherwise a clearly flagged simulation.
+    async fn order_book(&self, symbol: &str, depth: usize) -> Result<OrderBook> {
+        match self.primary.order_book(symbol, depth).await {
+            Ok(b) => Ok(b),
+            Err(e) => {
+                tracing::debug!("{} order book {symbol}: {e:#}; simulating", self.name);
+                self.sample.order_book(symbol, depth).await
+            }
+        }
+    }
+
     async fn yield_curves(&self) -> Result<YieldCurves> {
         match self.primary.yield_curves().await {
             Ok(c) => Ok(c),
@@ -275,6 +358,26 @@ pub(crate) fn clip(mut bars: Vec<Bar>, end: Option<i64>, limit: usize) -> Vec<Ba
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grouping_and_simulated_books() {
+        let b = OrderBook {
+            symbol: "X".into(),
+            bids: vec![(100.4, 1.0), (100.1, 2.0), (99.7, 1.0)],
+            asks: vec![(100.6, 1.0), (100.9, 3.0), (101.2, 1.0)],
+            source: "t".into(),
+            simulated: false,
+        };
+        let g = b.grouped(0.5);
+        assert_eq!(g.bids, vec![(100.0, 3.0), (99.5, 1.0)]);
+        assert_eq!(g.asks, vec![(101.0, 4.0), (101.5, 1.0)]);
+        assert!((b.mid().unwrap() - 100.5).abs() < 1e-9);
+        let s = sample::simulated_book("BTCUSD Curncy", 65_000.0, 20, 7);
+        assert!(s.simulated && s.bids.len() > 10 && s.asks.len() > 10);
+        assert!(s.bids[0].0 < 65_000.0 && s.asks[0].0 > 65_000.0);
+        assert!(s.bids.windows(2).all(|w| w[0].0 > w[1].0));
+        assert_eq!(s, sample::simulated_book("BTCUSD Curncy", 65_000.0, 20, 7));
+    }
 
     struct Broken;
 

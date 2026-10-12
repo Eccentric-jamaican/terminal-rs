@@ -17,6 +17,8 @@ pub enum Action {
     OpenProfile(String),
     Track(String, bool),
     AddToWatchlist(String),
+    /// Load a security into every pane of a colour link group.
+    LinkedSymbol(crate::layouts::Link, String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

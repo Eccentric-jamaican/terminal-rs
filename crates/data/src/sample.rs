@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tr_core::{Bar, Timeframe, sample};
 
-use crate::{LiveFeed, MarketData, security};
+use crate::{LiveFeed, MarketData, OrderBook, security};
 
 /// Deterministic synthetic data anchored at a fixed "now" per process, so paging is
 /// consistent: page N+1 is exactly the bars preceding page N. Levels and volatility
@@ -52,6 +52,12 @@ impl MarketData for SampleProvider {
         Ok(crate::clip(self.bars(symbol, tf), end, limit))
     }
 
+    /// A synthetic book around the last price; sizes vary with the clock so it moves.
+    async fn order_book(&self, symbol: &str, depth: usize) -> Result<OrderBook> {
+        let last = self.bars(symbol, Timeframe::M1).last().map(|b| b.close).unwrap_or(100.0);
+        Ok(simulated_book(symbol, last, depth, chrono::Utc::now().timestamp_millis() as u64 / 500))
+    }
+
     /// Random-walk ticks on the last bar every 400 ms, rolling into new bars on schedule.
     fn live(&self, symbol: &str, tf: Timeframe) -> Option<LiveFeed> {
         if !self.live_ticks {
@@ -83,6 +89,30 @@ impl MarketData for SampleProvider {
         });
         Some(rx)
     }
+}
+
+/// Deterministic synthetic order book for `symbol` around `mid` (varies with `step`).
+pub fn simulated_book(symbol: &str, mid: f64, depth: usize, step: u64) -> OrderBook {
+    let sec = security(symbol);
+    let tick = 10f64.powi(-(sec.decimals(mid) as i32)).max(mid * 2e-5);
+    let mut rng = sample::Rng::new(sample::seed_for(symbol) ^ step);
+    let base = 10_000.0 / mid.max(1e-9);
+    let mut side = |dir: f64| {
+        (0..depth)
+            .map(|i| {
+                let px = mid + dir * tick * (i as f64 + 0.5 + rng.f64() * 0.5).round().max(1.0);
+                let size = base * (0.2 + rng.f64() * 2.0) * (1.0 + i as f64 * 0.08);
+                (px, size)
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut bids = side(-1.0);
+    let mut asks = side(1.0);
+    bids.sort_by(|a, b| b.0.total_cmp(&a.0));
+    asks.sort_by(|a, b| a.0.total_cmp(&b.0));
+    bids.dedup_by(|a, b| a.0 == b.0);
+    asks.dedup_by(|a, b| a.0 == b.0);
+    OrderBook { symbol: symbol.to_string(), bids, asks, source: "Simulated".into(), simulated: true }
 }
 
 #[cfg(test)]
