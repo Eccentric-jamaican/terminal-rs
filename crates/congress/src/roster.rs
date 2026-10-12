@@ -16,6 +16,8 @@ pub const SENATE_ROSTER_URL: &str = "https://www.senate.gov/general/contact_info
 #[derive(Debug, Clone, PartialEq)]
 pub struct RosterMember {
     pub chamber: Chamber,
+    /// Canonical display name (House `official-name`, Senate first + last).
+    pub name: String,
     pub first: String,
     pub last: String,
     pub party: Party,
@@ -113,6 +115,8 @@ struct HouseInfo {
     party: String,
     #[serde(rename = "bioguideID", default)]
     bioguide: String,
+    #[serde(rename = "official-name", default)]
+    official_name: String,
 }
 
 /// Parse the House Clerk `MemberData.xml`. Vacant seats are skipped.
@@ -125,6 +129,11 @@ pub fn parse_house_roster(xml: &str) -> Result<Vec<RosterMember>> {
         .filter(|m| !m.info.lastname.trim().is_empty())
         .map(|m| RosterMember {
             chamber: Chamber::House,
+            name: if m.info.official_name.trim().is_empty() {
+                format!("{} {}", m.info.firstname.trim(), m.info.lastname.trim())
+            } else {
+                m.info.official_name.trim().to_string()
+            },
             first: m.info.firstname.trim().to_string(),
             last: m.info.lastname.trim().to_string(),
             party: Party::from_code(&m.info.party),
@@ -162,6 +171,7 @@ pub fn parse_senate_roster(xml: &str) -> Result<Vec<RosterMember>> {
         .into_iter()
         .map(|m| RosterMember {
             chamber: Chamber::Senate,
+            name: format!("{} {}", m.first_name.trim(), m.last_name.trim()),
             first: m.first_name.trim().to_string(),
             last: m.last_name.trim().to_string(),
             party: Party::from_code(&m.party),

@@ -176,9 +176,11 @@ fn rosters_resolve_party() {
     let alford = r.house_by_district("MO04").unwrap();
     assert_eq!(alford.last, "Alford");
     assert_eq!(alford.party, Party::Republican);
+    assert_eq!(alford.name, "Mark Alford");
     let f = r.find_by_name(Chamber::Senate, "John", "Fetterman").unwrap();
     assert_eq!(f.party, Party::Democrat);
     assert_eq!(f.state, "PA");
+    assert_eq!(f.name, "John Fetterman");
     assert!(r.find_by_name(Chamber::Senate, "A. Mitchell", "McConnell, Jr.").is_some());
     assert!(r.find_by_name(Chamber::Senate, "James Conley", "Justice, II").is_some());
     // Independents caucusing with Democrats keep their own party code.

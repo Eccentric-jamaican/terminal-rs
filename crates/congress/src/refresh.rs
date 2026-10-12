@@ -240,7 +240,8 @@ async fn refresh_house<S: Source>(
             .filter(|m| roster::normalize_name(&m.last).last() == roster::normalize_name(&entry.last).last())
             .or_else(|| roster.find_by_name(Chamber::House, &entry.first, &entry.last));
         let politician = NewPolitician {
-            name: entry.display_name(),
+            // The filing index has typos ("Scott Scott Franklin"); prefer the roster's name.
+            name: member.map(|m| m.name.clone()).unwrap_or_else(|| entry.display_name()),
             chamber: Chamber::House,
             party: member.map(|m| m.party).unwrap_or(Party::Unknown),
             state: entry.state(),
@@ -331,7 +332,7 @@ async fn refresh_senate<S: Source>(
         };
         let member = roster.find_by_name(Chamber::Senate, &r.first, &r.last);
         let politician = NewPolitician {
-            name: r.display_name(),
+            name: member.map(|m| m.name.clone()).unwrap_or_else(|| r.display_name()),
             chamber: Chamber::Senate,
             party: member.map(|m| m.party).unwrap_or(Party::Unknown),
             state: member.map(|m| m.state.clone()),

@@ -210,9 +210,25 @@ impl Db {
         &self.conn
     }
 
-    /// Insert or update a politician keyed by (chamber, name); returns its id.
-    /// Known party/state values are never overwritten with unknowns.
+    /// Insert or update a politician, keyed by bioguide ID when known and otherwise by
+    /// (chamber, name); returns its id. Known values are never overwritten with unknowns.
     pub fn upsert_politician(&self, p: &NewPolitician) -> Result<i64> {
+        if let Some(bio) = &p.bioguide {
+            let existing: Option<i64> = self
+                .conn
+                .query_row("SELECT id FROM politicians WHERE bioguide = ?1", [bio], |r| r.get(0))
+                .optional()?;
+            if let Some(id) = existing {
+                self.conn.execute(
+                    "UPDATE OR IGNORE politicians SET name = ?2, chamber = ?3,
+                       party = CASE WHEN ?4 <> '?' THEN ?4 ELSE party END,
+                       state = COALESCE(?5, state), district = COALESCE(?6, district)
+                     WHERE id = ?1",
+                    params![id, p.name, p.chamber.as_str(), p.party.code(), p.state, p.district],
+                )?;
+                return Ok(id);
+            }
+        }
         self.conn.execute(
             "INSERT INTO politicians (name, chamber, party, state, district, bioguide)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -474,6 +490,28 @@ mod tests {
             })
             .unwrap();
         assert_eq!(pid, pid2);
+        // Same bioguide under a differently spelled name (index typo) maps to the same row.
+        let pid3 = db
+            .upsert_politician(&NewPolitician {
+                name: "Jane Q Mrs Doe".into(),
+                chamber: Chamber::House,
+                party: Party::Unknown,
+                state: None,
+                district: None,
+                bioguide: Some("D000001".into()),
+            })
+            .unwrap();
+        assert_eq!(pid3, pid);
+        assert_eq!(db.politician(pid).unwrap().unwrap().party, Party::Republican);
+        db.upsert_politician(&NewPolitician {
+            name: "Jane Doe".into(),
+            chamber: Chamber::House,
+            party: Party::Republican,
+            state: None,
+            district: None,
+            bioguide: Some("D000001".into()),
+        })
+        .unwrap();
         let f = FilingRecord {
             id: "house:1".into(),
             chamber: Chamber::House,
