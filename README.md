@@ -1,19 +1,35 @@
 # terminal-rs
 
 A fast, keyboard-driven market terminal in pure Rust: TradingView-class GPU charting with a
-Bloomberg Terminal look (black background, amber monospace, dense tiled panes, a command line
-like `AAPL <GO>`) across **stocks, ETFs, indices, FX, crypto, US Treasuries and futures/commodities**,
+Bloomberg Terminal look (dense tiled panes, monospace numbers, a command line like `AAPL <GO>`)
+across **stocks, ETFs, indices, FX, crypto, US Treasuries, futures/commodities and options**,
 plus **congressional trade tracking ingested directly from the official STOCK Act disclosure
-systems**.
+systems**. Native compact UI, themes from Bloomberg amber to Solarized, and a fully dockable
+workspace with saved layouts.
 
-![terminal-rs: chart with fib/trendline drawings and congress markers, alerts, per-ticker congress list, watchlist, live feed and a politician profile](docs/img/terminal.png)
+![terminal-rs: AAPL chart with congress trade markers and RSI, the Congress trades feed, world markets and a multi-asset watchlist](docs/img/overview.png)
 
 > **Built from reverse-engineering research.** Chart UX was studied behaviourally on
 > tradingview.com with [REA](https://github.com/morluto/rea) in website mode (passive captures of
-> the public, logged-out chart page). Findings, evidence IDs and their design implications are in
-> [`docs/analysis/`](docs/analysis/README.md). Only behaviour was studied: no TradingView code,
-> scripts, icons, fonts or other assets are used or included here. The disclosure parsers were
-> likewise built by examining the public Senate eFD and House Clerk sites and their filings.
+> the public, logged-out chart page), then given a Bloomberg Terminal look. Findings, evidence IDs
+> and their design implications are in [`docs/analysis/`](docs/analysis/README.md). Only behaviour
+> was studied: no TradingView or Bloomberg code, scripts, icons, fonts or other assets are used or
+> included here. The disclosure parsers were likewise built by examining the public Senate eFD and
+> House Clerk sites and their filings.
+
+## Screenshots
+
+| | |
+|---|---|
+| ![Bloomberg theme: NVDA chart with congress markers and Nancy Pelosi's trade history with estimated returns](docs/img/bloomberg-politician.png) | ![Options chain (OMON) for AAPL with bid/ask, IV and delta per strike beside the chart](docs/img/options-omon.png) |
+| **Bloomberg theme** — `NVDA`, `POL PELOSI`: party-coloured B/S markers and a politician profile with estimated return, hit rate and disclosure lag | **Options** — `AAPL OMON`: every expiry, calls and puts by strike, IV and greeks, spot line |
+| ![Terminal Light theme with the latest congressional trades feed](docs/img/light-congress.png) | ![Nord theme, sidebar on the right, dragging a Watchlist tab onto the chart pane's dock compass](docs/img/docking-nord.png) |
+| **Terminal Light** — the latest STOCK Act filings with party, chamber, owner and amount filters | **Docking** (Nord theme, sidebar on the right) — drag a tab onto the compass to tab or split |
+| ![Live theme editor: Monokai applied to the chart while its colours are shown in Settings](docs/img/theme-editor.png) | ![Theme gallery in Settings › Appearance](docs/img/theme-gallery.png) ![Congress marker hover card with disclosure lag](docs/img/hover-card.png) |
+| **Theme editor** — edit any colour, font or density live; save, duplicate, import/export TOML or JSON | **Theme gallery** and the **marker hover card** (politician, amount, traded/filed, disclosure lag) |
+
+Screenshots are from the Linux build under Xvfb with live data (October 2026); on macOS the same UI
+gets the native title bar with traffic lights, window vibrancy behind the sidebar and SF fonts.
 
 ## Features
 
@@ -23,27 +39,27 @@ systems**.
   known tickers. A built-in catalog covers ~120 instruments (regional indices, equity index futures,
   energy/metals/grains, the full Treasury curve, majors and crosses, top crypto, popular ETFs and
   large caps); anything else resolves by convention.
-- **Symbol search everywhere** — typing in the command line shows matches across all asset classes
-  (catalog instantly, plus Yahoo search after a short pause); ↑/↓, Tab, Enter. `SECF gold cmdty`
-  opens a full search panel.
-- **WEI world markets** (`WEI`) — Americas/EMEA/Asia-Pacific indices, equity futures, Treasuries,
-  currencies, crypto and commodities with last, net and percent change (bp for yields) and
-  sparklines, refreshed every 20 s.
-- **Yield curve** (`GC`) — the US Treasury par curve now vs one month and one year ago, tenor
-  table with bp changes and 2s10s / 3m10y / 5s30s spreads.
-- **Live crypto charts** — Binance kline websocket (Coinbase ticker channel as fallback) updates
-  the forming bar in real time; charts show a LIVE badge.
-- **Command line** — `<SECURITY> [<FUNCTION>] <GO>` (Enter is `<GO>`); typing anywhere starts a
-  command, with a live interpretation underneath (`5` → "Interval 5 minutes"). History with ↑/↓.
-- **Tiling layouts** — `LAYOUT 1|2|2H|3|4|6`, Tab to cycle focus; any pane can be a chart, the
-  congress feed, a per-ticker list, a politician profile, the politician directory, alerts, a
-  watchlist or help. Layout, watchlist, charts, indicators and drawings persist between runs.
-- **Charts** — candles, OHLC bars, line and area; 1m, 5m, 15m, 30m, 1H, 4H, 1D, 1W, 1M plus quick
-  ranges (1D … ALL); volume overlay; SMA, EMA, VWAP, Bollinger overlays; RSI and MACD sub-panes;
-  `CMP <SYM>` compare rebased to the left edge of the view; log scale; crosshair with OHLC legend.
+- **Command line and search** — `<SECURITY> [<FUNCTION>] <GO>` (Enter is `<GO>`); typing anywhere
+  starts a command, with a live interpretation underneath (`5` → "Interval 5 minutes") and symbol
+  matches across all asset classes (catalog instantly, plus Yahoo search after a short pause);
+  ↑/↓, Tab, Enter; history with ↑/↓. `SECF gold cmdty` opens a full search panel.
+- **Charts** — GPU-rendered candles, OHLC bars, line and area; 1m, 5m, 15m, 30m, 1H, 4H, 1D, 1W,
+  1M plus quick ranges (1D … ALL); volume; SMA, EMA, VWAP, Bollinger overlays; RSI and MACD
+  sub-panes; `CMP <SYM>` compare; log scale; crosshair with OHLC legend; smooth pan and zoom over
+  a million bars. Live crypto bars from the Binance websocket (Coinbase fallback).
 - **Drawings** — trendline (Alt+T), horizontal (Alt+H), vertical (Alt+V) and fib retracement
   (Alt+F), stored in (time, price) so they survive zoom and timeframe changes; magnet (Alt+M) snaps
   to OHLC; click to select, Del to remove.
+- **Options** (`AAPL OMON`, ⌘⇧O) — full chains from Yahoo for US equities, ETFs and indices
+  (SPX via ^SPX): every expiration, calls and puts by strike with bid/ask/last, change, volume,
+  open interest and IV, plus Black-Scholes greeks (Δ, Γ, Θ/day, vega) from each contract's IV, the
+  dividend yield and the 3-month T-bill rate; in-the-money shading, spot line, ±10/±20/all
+  strikes; offline mode shows a flagged simulated chain.
+- **Markets** — `WEI` world markets (Americas/EMEA/Asia-Pacific indices, futures, Treasuries, FX,
+  crypto and commodities with sparklines), `GC` US Treasury yield curve (now vs 1M and 1Y ago,
+  2s10s / 3m10y / 5s30s), **news** (`AAPL CN`; Yahoo headlines, CoinDesk for crypto) and
+  **order book** depth (`BTCUSD CRNCY OB`; live Binance book, Coinbase fallback; markets without a
+  free public book show a clearly marked simulation).
 - **Market data behind a trait** (`tr_data::MarketData`), routed per asset class to free sources:
 
   | Asset class | History | Quotes | Live |
@@ -77,57 +93,42 @@ systems**.
   - **Alerts**: `TRACK <name>` (or ☆ in the directory/profile); when a tracked politician files a
     new PTR you get a toast, an `ALERTS n` badge and an entry in `ALERTS`.
 
-- **Fully customizable workspace**
-  - Free-form docking of any panel (chart, watchlist, news, order book, world markets, yield
-    curve, Congress feed, politicians, alerts, search, settings, help): drag a tab (or a pane's
-    header) onto another pane and drop on the dock compass (centre adds a tab, arrows split),
-    with a ghost preview and a labelled landing highlight, or drag to a window edge to dock there, resize with
-    dividers (double-click to equalise), tabs in every pane, and pop any pane out into its own
-    native window (close it to dock back). Add panels from each pane's **+** menu or with
-    `NEW <PANEL>` / `SPLIT [DOWN] <PANEL>`.
+- **Dockable workspace and saved layouts**
+  - Any panel (chart, watchlist, news, order book, world markets, yield curve, options, Congress
+    feed, politicians, alerts, search, settings, help) docks anywhere: drag a tab (or a pane's
+    header) onto another pane and drop on the compass (centre adds a tab, arrows split), with a
+    ghost preview and a labelled landing highlight, or drag to a window edge. Resize with
+    dividers (double-click to equalise), tabs in every pane, grid presets (`LAYOUT 1|2|2H|3|4|6`
+    or the toolbar), and pop any pane out into its own native window (close it to dock back).
+    Add panels from each pane's **+** menu, `NEW <PANEL>` / `SPLIT [DOWN] <PANEL>` or ⌘1…⌘0.
   - **Link groups**: give panes a colour (`LINK BLUE`, or the tab menu) and one security change
-    drives every linked chart, order book, news and per-ticker Congress pane; clicking a row in a
-    linked watchlist or world-markets pane loads it into the group.
+    drives every linked chart, order book, news, options and per-ticker Congress pane; clicking a
+    row in a linked watchlist or world-markets pane loads it into the group.
   - **Saved layouts**: save, name, rename, duplicate, delete and switch (`LAYOUT <name>`, the
-    sidebar list, ⌥1…⌥9); the active layout autosaves and is restored on launch. Each layout is
-    a JSON file in `~/Library/Application Support/terminal-rs/layouts` (`$XDG_DATA_HOME` on
-    Linux) and can be imported or exported (`LAYOUT EXPORT`/`IMPORT`, or Settings › Layouts).
-  - **Preferences** (`PREFS`, persisted in `prefs.json`): theme, sidebar side and vibrancy;
-    every hotkey is rebindable from a native shortcut table (click a binding, press the new
-    keys) in Settings and Help, and ⌘1…⌘0 open a new chart, watchlist, news, order book, world
-    markets, yield curve, Congress, politicians, alerts or search pane; defaults for new charts and order books. Per-pane
-    settings (chart type, indicators, drawings, filters, depth, link, tab title) save with the layout.
-  - **Themes**: built-in Terminal Dark, Terminal Light, Bloomberg (amber on black, monospace,
-    compact), High Contrast, Solarized Dark/Light, Nord and Monokai. A theme sets every colour
-    (backgrounds, panels, text, accent, up/down, chart candles, grid, series), the interface and
-    number fonts and size, and density (compact, regular, comfortable). Pick one from the gallery
-    in Settings › Appearance, the toolbar's right-click View menu, `THEME <name>` (prefix match),
-    `THEME NEXT|PREV|LIST|SYSTEM` or ⌘⌥T to cycle; System follows the OS with a chosen dark and
-    light theme. Settings › Themes is a live editor: tweak any colour, font or density and see it
-    immediately; editing a built-in makes a copy (built-ins stay read-only); duplicate, rename,
-    delete and import or export as TOML or JSON. Custom themes are TOML files in the `themes`
-    folder next to `layouts`; a partial file inherits everything else from Terminal Dark or Light.
-    `THEME COMPACT|REGULAR|COMFORTABLE|MONO|SF` adjust the active theme, and `LAYOUT THEME ON`
-    saves the theme with each layout.
-  - **Options** (`AAPL OMON`, ⌘⇧O): full chains from Yahoo for US equities, ETFs and indices
-    (SPX via ^SPX): every expiration, calls and puts by strike with bid/ask/last, change,
-    volume, open interest and IV, plus Black-Scholes greeks (Δ, Γ, Θ/day, vega) computed from
-    each contract's IV, the dividend yield and the 3-month T-bill rate; in-the-money shading,
-    spot marker, ±10/±20/all strikes; offline mode shows a flagged simulated chain.
-  - **Sidebar on either side**: View menu, `SIDEBAR LEFT|RIGHT`, ⌘⌥S or Settings; saved in
-    prefs and with each layout. The toolbar's sidebar toggle moves with it (mirrored on the right);
-    right-click it for the View menu (sidebar, theme, density, frame timing, settings).
-  - **News** (Yahoo headlines; CoinDesk for crypto) and **order book** depth (live Binance book,
-    Coinbase fallback; markets without a free public book show a clearly marked simulation).
-- **Native macOS feel** while keeping Bloomberg density and the command line: transparent title
-  bar with the traffic lights inset in a unified toolbar, a translucent source-list sidebar with
-  window vibrancy (`NSVisualEffectView` via `objc2`, in `crates/macos`) for the watchlist,
-  markets and Congress, SF Pro for chrome and SF Mono for numbers, rounded cards, segmented
-  controls with a sliding pill, spring animations (SwiftUI-style response/damping), hover states
-  and context menus (chart, watchlist, feed rows). Light/dark follows the system appearance and
-  the system accent colour; charts render at native retina scale with 4x MSAA.
-
-![Congress marker hover card with disclosure lag](docs/img/hover-card.png)
+    sidebar list, ⌥1…⌥9); the active layout autosaves and is restored on launch. Each layout is a
+    JSON file in `~/Library/Application Support/terminal-rs/layouts` (`$XDG_DATA_HOME` on Linux)
+    and can be imported or exported (`LAYOUT EXPORT`/`IMPORT`, or Settings › Layouts). Per-pane
+    settings (chart type, indicators, drawings, filters, depth, link, tab title) and, optionally,
+    the theme (`LAYOUT THEME ON`) save with the layout.
+- **Themes** — built-in Terminal Dark, Terminal Light, Bloomberg (amber on black, monospace,
+  compact), High Contrast, Solarized Dark/Light, Nord and Monokai. A theme sets every colour
+  (backgrounds, panels, text, accent, up/down, candles, grid, series), the interface and number
+  fonts and size, and density (compact, regular, comfortable). Pick one from the gallery in
+  Settings › Appearance, the View menu, `THEME <name>` (prefix match), `THEME NEXT|PREV|LIST` or
+  ⌘⌥T; `THEME SYSTEM` follows the OS with a chosen dark and light theme. Settings › Themes is a
+  live editor: editing a built-in makes a copy (built-ins stay read-only); duplicate, rename,
+  delete, import or export as TOML or JSON. Custom themes are TOML files in the `themes` folder
+  next to `layouts`; a partial file inherits everything else from Terminal Dark or Light.
+- **Native, compact UI** — a macOS unified compact toolbar with the traffic lights inset, a
+  translucent source-list sidebar with window vibrancy (`NSVisualEffectView` via `objc2`, in
+  `crates/macos`) that can sit on either side (`SIDEBAR LEFT|RIGHT`, ⌘⌥S; the toolbar toggle moves
+  and mirrors with it, right-click it for the View menu), SF Pro for chrome and SF Mono for
+  numbers, segmented controls, spring animations, hover states and context menus. The System
+  theme follows the OS appearance and accent colour; charts render at native retina scale with
+  4x MSAA.
+- **Hotkeys and preferences** — every hotkey is rebindable from a native shortcut table in
+  Settings › Hotkeys and Help (click a binding, press the new keys); defaults for new charts and
+  order books; everything persists in `prefs.json`.
 
 ## Running
 
@@ -148,25 +149,38 @@ chart anti-aliasing (default 4 on macOS), `TR_VIBRANCY=0` disables the transluce
 `terminal-rs.app`; `scripts/check-macos-cross.sh` compiles and lints the whole workspace for
 aarch64-apple-darwin from Linux (zig as the C cross-compiler; linking needs the macOS SDK).
 
-Press **F1** (or type `HELP`) for the full command and hotkey list. Highlights:
+## Keyboard shortcuts and commands
 
-| Input | Action |
+Press **F1** (or type `HELP`) for the full, searchable list; every hotkey can be rebound in
+Settings › Hotkeys. On Linux and Windows ⌘ is Ctrl and ⌥ is Alt.
+
+| Keys | Action |
+|---|---|
+| F1 · F2 · F3 · F4 · F5 · F6 · F12 | help · Congress feed · politicians · alerts · watchlist · refresh filings · frame timing |
+| Tab · ⇧Tab | next · previous pane |
+| ⌘1 … ⌘0 · ⌘⇧O | new chart, watchlist, news, order book, world markets, yield curve, Congress, politicians, alerts, search pane · options chain |
+| ⌘D · ⌘⇧D · ⌘T · ⌘W · ⌘⇧P | split right · split down · new tab · close pane · pop out |
+| ⌘S · ⌥1 … ⌥9 | save layout · switch to saved layout 1–9 |
+| ⌃⌘S (Ctrl+Shift+S) · ⌘⌥S | toggle sidebar · move sidebar to the other side |
+| ⌘⌥T · ⌘, | cycle theme · settings |
+| ⌥T · ⌥H · ⌥V · ⌥F · ⌥M | draw trendline · horizontal · vertical · fib · magnet |
+| ⌥R · ⌥L · Esc · Del | reset chart view · log scale · cancel · delete selected drawing |
+| wheel · drag · drag axes · double-click | zoom · pan · stretch · reset |
+
+| Command | Action |
 |---|---|
 | `AAPL` · `AAPL US EQUITY <GO>` | load a security in the focused chart |
 | `BTCUSD <CRNCY>` · `EURUSD <CRNCY>` · `US10Y <GOVT>` · `CL1 <CMDTY>` · `SPX <INDEX>` | other asset classes |
-| `WEI` · `GC` · `SECF <query>` | world markets · yield curve · security search |
 | `5` `1H` `D` `1W` `1M` · `YTD` `5Y` `ALL` | interval · quick range |
 | `RSI` `MACD` `BB` `SMA 50` `EMA 20` `VWAP` · `CLEAR` | toggle indicators |
 | `CMP MSFT` · `LOG` · `CANDLE` `BAR` `LINE` `AREA` | compare · log scale · chart type |
-| `CONG` · `NVDA CONG` · `POL PELOSI` · `TRACK PELOSI` · `ALERTS` | congress functions |
-| wheel / drag / drag axes / double-click | zoom / pan / stretch / reset |
-| Alt+T/H/V/F · Alt+R · Alt+L · Esc · Del | draw · reset view · log · cancel · delete drawing |
-| F1–F6 · Tab · F12 | help, CONG, POL, ALRT, WL, SYNC · next pane · frame-time readout |
-| `NEW BOOK` · `SPLIT DOWN NEWS` · `POP` · `LINK GREEN` · `TITLE Desk` | add, split, pop out, link, rename panes |
-| `LAYOUT SAVE Macro` · `LAYOUT Macro` · `LAYOUT RENAME Rates` · `LAYOUT DUP` · `LAYOUT DEL` · `LAYOUT EXPORT` | saved layouts |
-| `AAPL CN` · `BTCUSD CRNCY OB` · `PREFS` | news · order book · settings |
-| `THEME BLOOMBERG` · `THEME NEXT` (⌘⌥T) · `THEME EDIT` · `THEME COMPACT` · `LAYOUT THEME ON` | themes |
-| right-click chart / watchlist / feed row | context menu (chart type, indicators, draw, add to watchlist, who traded it) |
+| `AAPL OMON` · `AAPL CN` · `BTCUSD CRNCY OB` · `WEI` · `GC` · `SECF <query>` | options · news · order book · world markets · yield curve · search |
+| `CONG` · `NVDA CONG` · `POL PELOSI` · `TRACK PELOSI` · `ALERTS` · `REFRESH` | Congress feed · who traded it · profile · track · alerts · refresh |
+| `NEW BOOK` · `SPLIT DOWN NEWS` · `POP` · `LINK GREEN` · `TITLE Desk` · `CLOSE` | add, split, pop out, link, rename, close panes |
+| `LAYOUT 4` · `LAYOUT SAVE Macro` · `LAYOUT Macro` · `LAYOUT RENAME Rates` · `LAYOUT DUP` · `LAYOUT DEL` · `LAYOUT EXPORT` | grid preset · saved layouts |
+| `THEME BLOOMBERG` · `THEME NEXT` · `THEME SYSTEM` · `THEME EDIT` · `THEME COMPACT` · `LAYOUT THEME ON` | themes |
+| `SIDEBAR RIGHT` · `SIDEBAR` · `PREFS` · `HELP` | sidebar side or visibility · settings · help |
+| right-click chart / watchlist / feed row / sidebar toggle | context menu (chart type, indicators, draw, add to watchlist, who traded it, View menu) |
 
 ## Architecture
 
@@ -251,6 +265,9 @@ cargo bench -p tr-core && cargo bench -p tr-chart
   settings, links, popped windows, older formats), the store (save, list, rename, duplicate,
   delete, import, export, safe file names), migration from pre-docking settings, prefs and
   keymap parsing/rebinding.
+- Themes: every built-in round-trips through TOML and JSON, partial theme files inherit from the
+  dark/light base, the themes folder store (save, rename, delete, name collisions), copy-on-write
+  names and migration of older appearance preferences.
 - The chart renders real frames offscreen on whatever adapter is present and checks pixels.
 
 ## Platform notes and limitations
