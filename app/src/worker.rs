@@ -2,6 +2,7 @@
 //! tokio runtime; the UI thread only sends [`Request`]s and drains [`Response`]s, so it
 //! never blocks.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
@@ -14,8 +15,8 @@ use tr_congress::db::{Alert, PoliticianSummary};
 use tr_congress::performance::{self, Performance, TradeReturn};
 use tr_congress::refresh::{self, HttpSource, NewTradeAlert, RefreshConfig};
 use tr_congress::{Db, Politician, Trade};
-use tr_core::{Bar, Timeframe, indicators};
-use tr_data::{BarCache, Provider, Quote};
+use tr_core::{Bar, Security, Series, Timeframe, indicators};
+use tr_data::{BarCache, Provider, Quote, SearchHit, YieldCurves};
 
 use crate::command::IndicatorSpec;
 use crate::theme;
@@ -77,6 +78,10 @@ pub enum Request {
     Alerts,
     MarkAlertsSeen,
     RefreshCongress,
+    /// A pane closed or changed: stop its live feed and drop its series.
+    Forget(PaneId),
+    YieldCurves,
+    Search(String),
 }
 
 pub struct BuiltIndicator {
@@ -104,6 +109,8 @@ pub enum Response {
         prepended: usize,
         from_cache: bool,
         exhausted: bool,
+        /// A live-feed update of the latest bar.
+        live: bool,
     },
     HistoryError {
         pane: PaneId,
@@ -143,6 +150,11 @@ pub enum Response {
     NewAlerts(Vec<NewTradeAlert>),
     Status(String),
     CongressRefreshed(String),
+    Curves(Box<YieldCurves>),
+    SearchHits {
+        query: String,
+        hits: Vec<SearchHit>,
+    },
 }
 
 pub struct Worker {
@@ -151,8 +163,14 @@ pub struct Worker {
     _rt: tokio::runtime::Runtime,
 }
 
+/// Bars per pane tagged with the load generation they belong to.
+type SeriesMap = HashMap<PaneId, (u64, Arc<Vec<Bar>>)>;
+
 struct Shared {
     provider: Provider,
+    /// Authoritative bars per chart pane (history, paging and live ticks all merge here),
+    /// tagged with the pane's load generation.
+    series: std::sync::Mutex<SeriesMap>,
     cache: std::sync::Mutex<Option<BarCache>>,
     db: Mutex<Db>,
     out: mpsc::Sender<Response>,
@@ -198,7 +216,14 @@ impl Worker {
             .build()?;
         let (tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel::<Request>();
         let (out, rx) = mpsc::channel();
-        let shared = Arc::new(Shared { provider, cache: std::sync::Mutex::new(cache), db: Mutex::new(db), out, ctx });
+        let shared = Arc::new(Shared {
+            provider,
+            series: Default::default(),
+            cache: std::sync::Mutex::new(cache),
+            db: Mutex::new(db),
+            out,
+            ctx,
+        });
 
         // Request dispatcher: every request runs as its own task.
         let s = shared.clone();
@@ -334,9 +359,12 @@ pub fn initial_limit(tf: Timeframe) -> usize {
     std::env::var("TR_HISTORY_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or_else(|| default_limit(tf))
 }
 
-async fn handle(s: &Shared, req: Request) {
+async fn handle(s: &Arc<Shared>, req: Request) {
     match req {
         Request::History { pane, generation, symbol, tf, limit } => {
+            if !claim_series(s, pane, generation) {
+                return; // a newer load for this pane is already running
+            }
             // Paint from the disk cache immediately, then refresh from the network.
             let cached = s.cache.lock().ok().and_then(|c| c.as_ref().and_then(|c| c.load(&symbol, tf, limit).ok()));
             if let Some(bars) = cached.filter(|b| !b.is_empty()) {
@@ -352,6 +380,7 @@ async fn handle(s: &Shared, req: Request) {
                     prepended: 0,
                     from_cache: true,
                     exhausted: false,
+                    live: false,
                 });
             }
             match s.provider.history(&symbol, tf, None, limit).await {
@@ -363,32 +392,45 @@ async fn handle(s: &Shared, req: Request) {
                     }
                     let exhausted = bars.len() < limit / 2;
                     let bars = Arc::new(bars);
+                    if !store_series(s, pane, generation, bars.clone()) {
+                        return; // superseded while loading
+                    }
                     let gpu = build_gpu(bars.clone()).await;
                     s.send(Response::History {
                         pane,
                         generation,
-                        symbol,
+                        symbol: symbol.clone(),
                         tf,
                         bars,
                         gpu,
                         prepended: 0,
                         from_cache: false,
                         exhausted,
+                        live: false,
                     });
+                    start_live(s.clone(), pane, generation, symbol, tf);
                 }
                 Ok(_) => s.send(Response::HistoryError { pane, generation, error: format!("no data for {symbol}") }),
                 Err(e) => s.send(Response::HistoryError { pane, generation, error: format!("{e:#}") }),
             }
         }
         Request::MoreHistory { pane, generation, symbol, tf, existing, limit } => {
-            let Some(first) = existing.first() else { return };
+            // Page from the worker's copy (it may hold newer live bars than the UI's).
+            let base = current_series(s, pane, generation).filter(|b| !b.is_empty()).unwrap_or(existing);
+            let Some(first) = base.first().copied() else { return };
             match s.provider.history(&symbol, tf, Some(first.ts), limit).await {
                 Ok(older) => {
                     let older: Vec<Bar> = older.into_iter().filter(|b| b.ts < first.ts).collect();
                     let prepended = older.len();
-                    let mut merged = older;
-                    merged.extend_from_slice(&existing);
-                    let bars = Arc::new(merged);
+                    let bars = {
+                        let mut map = s.series.lock().expect("series lock");
+                        let Some((g, cur)) = map.get_mut(&pane).filter(|(g, _)| *g == generation) else { return };
+                        let _ = g;
+                        let mut merged = older;
+                        merged.extend_from_slice(cur);
+                        *cur = Arc::new(merged);
+                        cur.clone()
+                    };
                     let gpu = build_gpu(bars.clone()).await;
                     s.send(Response::History {
                         pane,
@@ -400,6 +442,7 @@ async fn handle(s: &Shared, req: Request) {
                         prepended,
                         from_cache: false,
                         exhausted: prepended == 0,
+                        live: false,
                     });
                 }
                 Err(e) => s.send(Response::HistoryError { pane, generation, error: format!("{e:#}") }),
@@ -423,7 +466,12 @@ async fn handle(s: &Shared, req: Request) {
             }
         }
         Request::Markers { pane, symbol } => {
-            let trades = s.db.lock().await.trades_for_ticker(&symbol, 2_000).unwrap_or_default();
+            let sec = tr_data::security(&symbol);
+            let trades = if sec.has_congress_trades() {
+                s.db.lock().await.trades_for_ticker(&sec.ticker, 2_000).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             s.send(Response::Markers { pane, symbol, trades });
         }
         Request::Quotes(symbols) => match s.provider.quotes(&symbols).await {
@@ -435,7 +483,8 @@ async fn handle(s: &Shared, req: Request) {
             s.send(Response::Latest(t));
         }
         Request::TickerTrades { pane, symbol } => {
-            let trades = s.db.lock().await.trades_for_ticker(&symbol, 1_000).unwrap_or_default();
+            let ticker = Security::parse(&symbol).map(|x| x.ticker).unwrap_or_else(|| symbol.clone());
+            let trades = s.db.lock().await.trades_for_ticker(&ticker, 1_000).unwrap_or_default();
             s.send(Response::TickerTrades { pane, symbol, trades });
         }
         Request::Profile { pane, query } => {
@@ -470,7 +519,94 @@ async fn handle(s: &Shared, req: Request) {
             s.send(Response::Alerts(db.alerts(false, 200).unwrap_or_default()));
         }
         Request::RefreshCongress => congress_refresh(s).await,
+        Request::Forget(pane) => {
+            s.series.lock().expect("series lock").remove(&pane);
+        }
+        Request::YieldCurves => match s.provider.yield_curves().await {
+            Ok(c) => s.send(Response::Curves(Box::new(c))),
+            Err(e) => s.send(Response::Status(format!("yield curve: {e:#}"))),
+        },
+        Request::Search(query) => {
+            let hits = s.provider.search(&query).await.unwrap_or_default();
+            s.send(Response::SearchHits { query, hits });
+        }
     }
+}
+
+/// Register a load for `generation`; generations only move forward, since request
+/// tasks run concurrently and may start out of order.
+fn claim_series(s: &Shared, pane: PaneId, generation: u64) -> bool {
+    let mut map = s.series.lock().expect("series lock");
+    match map.get(&pane) {
+        Some((g, _)) if *g > generation => false,
+        Some((g, _)) if *g == generation => true,
+        _ => {
+            map.insert(pane, (generation, Arc::new(Vec::new())));
+            true
+        }
+    }
+}
+
+/// Store freshly loaded bars for a pane if `generation` is still the newest.
+fn store_series(s: &Shared, pane: PaneId, generation: u64, bars: Arc<Vec<Bar>>) -> bool {
+    let mut map = s.series.lock().expect("series lock");
+    match map.get(&pane) {
+        Some((g, _)) if *g > generation => false,
+        _ => {
+            map.insert(pane, (generation, bars));
+            true
+        }
+    }
+}
+
+fn current_series(s: &Shared, pane: PaneId, generation: u64) -> Option<Arc<Vec<Bar>>> {
+    s.series.lock().expect("series lock").get(&pane).filter(|(g, _)| *g == generation).map(|(_, b)| b.clone())
+}
+
+/// Merge the provider's live feed (if any) into the pane's series, publishing at most
+/// four updates a second. Stops when the pane reloads, closes or the feed ends.
+fn start_live(s: Arc<Shared>, pane: PaneId, generation: u64, symbol: String, tf: Timeframe) {
+    let Some(mut feed) = s.provider.live(&symbol, tf) else { return };
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_millis(250));
+        let mut dirty = false;
+        loop {
+            tokio::select! {
+                bar = feed.recv() => {
+                    let Some(bar) = bar else { break };
+                    let mut map = s.series.lock().expect("series lock");
+                    match map.get_mut(&pane) {
+                        Some((g, bars)) if *g == generation => dirty |= Series::apply_live(Arc::make_mut(bars), bar),
+                        _ => break,
+                    }
+                }
+                _ = tick.tick() => {
+                    if !dirty {
+                        if current_series(&s, pane, generation).is_none() {
+                            break;
+                        }
+                        continue;
+                    }
+                    dirty = false;
+                    let Some(bars) = current_series(&s, pane, generation) else { break };
+                    let gpu = build_gpu(bars.clone()).await;
+                    s.send(Response::History {
+                        pane,
+                        generation,
+                        symbol: symbol.clone(),
+                        tf,
+                        bars,
+                        gpu,
+                        prepended: 0,
+                        from_cache: false,
+                        exhausted: false,
+                        live: true,
+                    });
+                }
+            }
+        }
+        tracing::debug!("live feed for pane {pane} ({symbol}) stopped");
+    });
 }
 
 async fn build_gpu(bars: Arc<Vec<Bar>>) -> SeriesGpu {
@@ -510,7 +646,7 @@ async fn profile(s: &Shared, query: &str) -> Option<Profile> {
     let fetches = tickers.into_iter().map(|t| {
         let provider = provider.clone();
         async move {
-            let r = provider.history(&t, Timeframe::D1, None, days.min(4000)).await;
+            let r = provider.history(&format!("{t} US Equity"), Timeframe::D1, None, days.min(4000)).await;
             (t, r)
         }
     });
@@ -565,6 +701,26 @@ mod tests {
         assert_eq!(built[0].overlays.len(), 3);
         assert_eq!(built[1].overlays[0].1.kind, LineKind::Hist);
         assert_eq!(built[2].overlays.len(), 1);
+    }
+
+    #[test]
+    fn series_generations_only_move_forward() {
+        let (out, _rx) = mpsc::channel();
+        let s = Shared {
+            provider: std::sync::Arc::new(tr_data::sample::SampleProvider::at(0, 10)),
+            series: Default::default(),
+            cache: std::sync::Mutex::new(None),
+            db: Mutex::new(Db::open_in_memory().unwrap()),
+            out,
+            ctx: egui::Context::default(),
+        };
+        // The newer load's task starts first; the older one must not take over.
+        assert!(claim_series(&s, 1, 2));
+        assert!(!claim_series(&s, 1, 1));
+        assert!(!store_series(&s, 1, 1, Arc::new(vec![])));
+        assert!(store_series(&s, 1, 2, Arc::new(vec![Bar::new(0, 1.0, 1.0, 1.0, 1.0, 1.0)])));
+        assert_eq!(current_series(&s, 1, 2).unwrap().len(), 1);
+        assert!(current_series(&s, 1, 1).is_none());
     }
 
     #[test]

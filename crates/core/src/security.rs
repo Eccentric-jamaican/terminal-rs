@@ -134,7 +134,13 @@ impl Security {
     /// Returns the security and how many input tokens it consumed.
     pub fn resolve_tokens(tokens: &[&str]) -> Option<(Self, usize)> {
         let (&head, rest) = tokens.split_first()?;
-        let ticker = head.trim().to_ascii_uppercase().replace('/', "");
+        // `BTC/USD` is a pair; `BRK/B` is a share class.
+        let up = head.trim().to_ascii_uppercase();
+        let ticker = match up.split_once('/') {
+            Some((a, b)) if a.len() >= 3 && b.len() >= 3 => format!("{a}{b}"),
+            Some((a, b)) => format!("{a}.{b}"),
+            None => up,
+        };
         if !looks_like_ticker(&ticker) {
             return None;
         }
@@ -272,6 +278,7 @@ mod tests {
         assert_eq!(r("ZZZQ").class, AssetClass::Equity);
         assert_eq!(r("PEPEUSD CRNCY").class, AssetClass::Crypto);
         assert_eq!(r("btc/usd").ticker, "BTCUSD");
+        assert_eq!(r("brk/b").ticker, "BRK.B");
     }
 
     #[test]

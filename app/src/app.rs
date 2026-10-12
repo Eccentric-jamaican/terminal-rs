@@ -10,12 +10,13 @@ use tr_chart::scene::ChartType;
 use tr_congress::Trade;
 use tr_congress::db::{Alert, PoliticianSummary};
 use tr_core::Timeframe;
-use tr_data::Quote;
+use tr_data::{Quote, SearchHit, YieldCurves};
 
 use crate::chart_view::ChartState;
 use crate::command::{self, Command, Function, IndicatorSpec};
 use crate::congress_view::{self, Action, FeedFilter};
 use crate::layout::Layout;
+use crate::markets_view;
 use crate::theme::{self, AMBER, AMBER_DIM, MUTED, TEXT, mono};
 use crate::worker::{PaneId, Profile, Request, Response, Worker, data_dir};
 
@@ -32,6 +33,9 @@ pub enum PaneKind {
     Alerts,
     Watchlist,
     Help,
+    Wei,
+    Curve,
+    Search { query: String },
 }
 
 impl PaneKind {
@@ -48,6 +52,9 @@ impl PaneKind {
             PaneKind::Alerts => "ALRT  Alerts for tracked politicians".into(),
             PaneKind::Watchlist => "WL  Watchlist".into(),
             PaneKind::Help => "HELP  Commands and hotkeys".into(),
+            PaneKind::Wei => "WEI  World markets: indices, futures, rates, FX, crypto, commodities".into(),
+            PaneKind::Curve => "GC  US Treasury yield curve (Treasury.gov par yields)".into(),
+            PaneKind::Search { query } => format!("SECF  Security search: {query}"),
         }
     }
 }
@@ -83,6 +90,9 @@ enum PaneSettings {
     Alerts,
     Watchlist,
     Help,
+    Wei,
+    Curve,
+    Search(String),
 }
 
 pub struct TerminalApp {
@@ -93,6 +103,15 @@ pub struct TerminalApp {
     focus: usize,
     next_id: PaneId,
     last_opened: Option<usize>,
+    curves: Option<Box<YieldCurves>>,
+    last_wei: Option<Instant>,
+    last_curve: Option<Instant>,
+    wei_updated: Option<String>,
+    /// Latest network search results and the query they answer.
+    net_hits: (String, Vec<SearchHit>),
+    /// Query typed in the command line awaiting a debounced network search.
+    search_pending: Option<(String, Instant)>,
+    suggestion: Option<usize>,
 
     cmd: String,
     cmd_history: Vec<String>,
@@ -122,6 +141,23 @@ pub struct TerminalApp {
     last_frame: Option<Instant>,
 }
 
+/// Resolve a run of words (`BTCUSD CRNCY AAPL US EQUITY MSFT`) into market keys.
+fn keys_from_words(words: &[String]) -> Vec<String> {
+    let tokens: Vec<&str> = words.iter().map(String::as_str).collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        match tr_core::Security::resolve_tokens(&tokens[i..]) {
+            Some((sec, used)) => {
+                out.push(sec.key());
+                i += used;
+            }
+            None => i += 1,
+        }
+    }
+    out
+}
+
 fn settings_path() -> std::path::PathBuf {
     data_dir().join("settings.json")
 }
@@ -139,6 +175,13 @@ impl TerminalApp {
             focus: 0,
             next_id: 1,
             last_opened: None,
+            curves: None,
+            last_wei: None,
+            last_curve: None,
+            wei_updated: None,
+            net_hits: (String::new(), Vec::new()),
+            search_pending: None,
+            suggestion: None,
             cmd: String::new(),
             cmd_history: Vec::new(),
             cmd_hist_pos: None,
@@ -151,9 +194,21 @@ impl TerminalApp {
             pol_search: String::new(),
             alerts: Vec::new(),
             congress_status: String::new(),
-            watchlist: ["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "JPM"]
-                .map(String::from)
-                .to_vec(),
+            watchlist: [
+                "SPX Index",
+                "AAPL US Equity",
+                "NVDA US Equity",
+                "SPY US Equity",
+                "BTCUSD Curncy",
+                "ETHUSD Curncy",
+                "EURUSD Curncy",
+                "USDJPY Curncy",
+                "US10Y Govt",
+                "CL1 Comdty",
+                "GC1 Comdty",
+            ]
+            .map(String::from)
+            .to_vec(),
             quotes: HashMap::new(),
             last_quotes: None,
             last_feed: None,
@@ -167,7 +222,9 @@ impl TerminalApp {
         match settings {
             Some(s) => {
                 app.layout = s.layout;
-                app.watchlist = s.watchlist;
+                // Older settings stored bare tickers; normalise to market keys.
+                app.watchlist = s.watchlist.iter().map(|w| tr_data::security(w).key()).collect();
+                app.watchlist.dedup();
                 for p in s.panes {
                     let kind = app.kind_from_settings(p);
                     app.push_pane(kind);
@@ -177,7 +234,7 @@ impl TerminalApp {
                 for kind in [
                     PaneKind::Chart(Box::new(ChartState::new(0, "AAPL", Timeframe::D1))),
                     PaneKind::Feed,
-                    PaneKind::Ticker { symbol: "AAPL".into(), trades: Vec::new(), loading: true },
+                    PaneKind::Wei,
                     PaneKind::Watchlist,
                 ] {
                     app.push_pane(kind);
@@ -209,6 +266,9 @@ impl TerminalApp {
             PaneSettings::Alerts => PaneKind::Alerts,
             PaneSettings::Watchlist => PaneKind::Watchlist,
             PaneSettings::Help => PaneKind::Help,
+            PaneSettings::Wei => PaneKind::Wei,
+            PaneSettings::Curve => PaneKind::Curve,
+            PaneSettings::Search(q) => PaneKind::Search { query: q },
         }
     }
 
@@ -233,6 +293,9 @@ impl TerminalApp {
                 PaneKind::Alerts => PaneSettings::Alerts,
                 PaneKind::Watchlist => PaneSettings::Watchlist,
                 PaneKind::Help => PaneSettings::Help,
+                PaneKind::Wei => PaneSettings::Wei,
+                PaneKind::Curve => PaneSettings::Curve,
+                PaneKind::Search { query } => PaneSettings::Search(query.clone()),
             })
             .collect();
         let s = Settings { layout: self.layout, watchlist: self.watchlist.clone(), panes };
@@ -277,7 +340,8 @@ impl TerminalApp {
         let id = self.next_id;
         self.next_id += 1;
         let kind = self.init_kind(id, kind);
-        self.panes[idx] = Pane { id, kind };
+        let old = std::mem::replace(&mut self.panes[idx], Pane { id, kind });
+        self.worker.send(Request::Forget(old.id));
     }
 
     fn fit_panes_to_layout(&mut self) {
@@ -288,17 +352,23 @@ impl TerminalApp {
                 PaneKind::Feed
             } else if !has(|k| matches!(k, PaneKind::Watchlist)) {
                 PaneKind::Watchlist
+            } else if !has(|k| matches!(k, PaneKind::Wei)) {
+                PaneKind::Wei
+            } else if !has(|k| matches!(k, PaneKind::Curve)) {
+                PaneKind::Curve
             } else if !has(|k| matches!(k, PaneKind::Politicians)) {
                 PaneKind::Politicians
             } else if !has(|k| matches!(k, PaneKind::Alerts)) {
                 PaneKind::Alerts
             } else {
-                let sym = ["SPY", "QQQ", "NVDA", "MSFT"][self.panes.len() % 4];
+                let sym = ["BTCUSD Curncy", "SPX Index", "EURUSD Curncy", "CL1 Comdty"][self.panes.len() % 4];
                 PaneKind::Chart(Box::new(ChartState::new(0, sym, Timeframe::D1)))
             };
             self.push_pane(kind);
         }
-        self.panes.truncate(n);
+        for p in self.panes.drain(n.min(self.panes.len())..) {
+            self.worker.send(Request::Forget(p.id));
+        }
         self.focus = self.focus.min(n - 1);
         self.last_opened = self.last_opened.filter(|&i| i < n);
     }
@@ -349,7 +419,7 @@ impl TerminalApp {
 
     fn open_chart(&mut self, symbol: &str) {
         self.with_chart(|c, w| c.set_symbol(symbol, w));
-        self.status = format!("{symbol} US Equity");
+        self.status = tr_data::security(symbol).key();
     }
 
     fn open_panel(&mut self, kind: PaneKind) {
@@ -424,15 +494,18 @@ impl TerminalApp {
             }
             Function::Refresh => self.worker.send(Request::RefreshCongress),
             Function::Watchlist => self.open_panel(PaneKind::Watchlist),
-            Function::WatchAdd(syms) => {
-                for s in syms {
-                    if !self.watchlist.contains(&s) {
-                        self.watchlist.push(s);
+            Function::WatchAdd(words) => {
+                for key in keys_from_words(&words) {
+                    if !self.watchlist.contains(&key) {
+                        self.watchlist.push(key);
                     }
                 }
                 self.last_quotes = None;
             }
-            Function::WatchRemove(syms) => self.watchlist.retain(|s| !syms.contains(s)),
+            Function::WatchRemove(words) => {
+                let keys = keys_from_words(&words);
+                self.watchlist.retain(|s| !keys.contains(s));
+            }
             Function::Layout(l) => match Layout::parse(&l) {
                 Some(l) => {
                     self.layout = l;
@@ -449,7 +522,8 @@ impl TerminalApp {
             }
             Function::ClosePane => {
                 if self.panes.len() > 1 {
-                    self.panes.remove(self.focus);
+                    let old = self.panes.remove(self.focus);
+                    self.worker.send(Request::Forget(old.id));
                     let prev =
                         Layout::ALL.into_iter().rev().find(|l| l.slots() <= self.panes.len()).unwrap_or(Layout::One);
                     self.layout = prev;
@@ -457,6 +531,21 @@ impl TerminalApp {
                 }
             }
             Function::Help => self.open_panel(PaneKind::Help),
+            Function::Wei => {
+                self.last_wei = None;
+                self.open_panel(PaneKind::Wei);
+            }
+            Function::Curve => {
+                self.worker.send(Request::YieldCurves);
+                self.last_curve = Some(Instant::now());
+                self.open_panel(PaneKind::Curve);
+            }
+            Function::Search(q) => {
+                if !q.trim().is_empty() {
+                    self.worker.send(Request::Search(q.clone()));
+                }
+                self.open_panel(PaneKind::Search { query: q });
+            }
         }
     }
 
@@ -472,13 +561,24 @@ impl TerminalApp {
     fn drain(&mut self) {
         while let Ok(r) = self.worker.rx.try_recv() {
             match r {
-                Response::History { pane, generation, symbol, tf, bars, gpu, prepended, from_cache, exhausted } => {
+                Response::History {
+                    pane,
+                    generation,
+                    symbol,
+                    tf,
+                    bars,
+                    gpu,
+                    prepended,
+                    from_cache,
+                    exhausted,
+                    live,
+                } => {
                     let worker = &self.worker;
                     if let Some(PaneKind::Chart(c)) = self.panes.iter_mut().find(|p| p.id == pane).map(|p| &mut p.kind)
                         && c.symbol == symbol
                         && c.tf == tf
                     {
-                        c.on_history(generation, bars, gpu, prepended, from_cache, exhausted, worker);
+                        c.on_history(generation, bars, gpu, prepended, from_cache, exhausted, live, worker);
                     }
                 }
                 Response::HistoryError { pane, generation, error } => {
@@ -507,6 +607,9 @@ impl TerminalApp {
                     }
                 }
                 Response::Quotes(q) => {
+                    if q.len() > 20 {
+                        self.wei_updated = Some(format!("updated {}", chrono::Local::now().format("%H:%M:%S")));
+                    }
                     for x in q {
                         self.quotes.insert(x.symbol.clone(), x);
                     }
@@ -540,6 +643,8 @@ impl TerminalApp {
                     self.worker.send(Request::Alerts);
                 }
                 Response::Status(s) => self.status = s,
+                Response::Curves(c) => self.curves = Some(c),
+                Response::SearchHits { query, hits } => self.net_hits = (query, hits),
                 Response::CongressRefreshed(summary) => {
                     self.congress_status = format!("last ingest: {summary}");
                     self.status = format!("Congress disclosures updated: {summary}");
@@ -705,6 +810,31 @@ impl TerminalApp {
             pos2(logo.right() + 8.0, rect.top() + 4.0),
             pos2(rect.right() - 300.0, rect.top() + 24.0),
         );
+        let suggestions = self.suggestions();
+        // Claim navigation keys for the dropdown before the text field sees them.
+        let (sel_down, sel_up, complete) = if suggestions.is_empty() {
+            (false, false, false)
+        } else {
+            ui.input_mut(|i| {
+                (
+                    i.consume_key(Modifiers::NONE, Key::ArrowDown),
+                    i.consume_key(Modifiers::NONE, Key::ArrowUp),
+                    i.consume_key(Modifiers::NONE, Key::Tab),
+                )
+            })
+        };
+        if sel_down {
+            self.suggestion = Some(self.suggestion.map_or(0, |i| (i + 1).min(suggestions.len() - 1)));
+        }
+        if sel_up {
+            self.suggestion = self.suggestion.and_then(|i| i.checked_sub(1));
+        }
+        if complete {
+            let pick = &suggestions[self.suggestion.unwrap_or(0)];
+            self.cmd = format!("{} ", pick.key);
+            self.suggestion = None;
+            self.focus_cmd = true;
+        }
         let mut child = ui.new_child(UiBuilder::new().max_rect(cmd_rect));
         let id = egui::Id::new("command-line");
         let te = egui::TextEdit::singleline(&mut self.cmd)
@@ -712,8 +842,10 @@ impl TerminalApp {
             .font(mono(14.0))
             .text_color(AMBER)
             .hint_text(
-                RichText::new("<TICKER> <GO>   e.g. AAPL · NVDA CONG · POL PELOSI · RSI · 5 · LAYOUT 4")
-                    .color(AMBER_DIM),
+                RichText::new(
+                    "<KEY> <GO>   e.g. BTCUSD <CRNCY> · US10Y GOVT · CL1 CMDTY · SPX INDEX · AAPL · WEI · GC",
+                )
+                .color(AMBER_DIM),
             )
             .desired_width(cmd_rect.width())
             .frame(
@@ -722,7 +854,14 @@ impl TerminalApp {
                     .stroke(Stroke::new(1.0, AMBER_DIM))
                     .inner_margin(vec2(6.0, 2.0)),
             );
-        let resp = child.add(te);
+        let resp = child.add(te.lock_focus(true));
+        if resp.changed() {
+            self.suggestion = None;
+            let q = self.cmd.trim().to_string();
+            if q.len() >= 2 && !self.suggestions().is_empty() {
+                self.search_pending = Some((q, Instant::now()));
+            }
+        }
         if self.focus_cmd {
             resp.request_focus();
             // Place the cursor at the end after type-to-command.
@@ -744,8 +883,10 @@ impl TerminalApp {
         });
         if resp.lost_focus() && enter {
             let input = std::mem::take(&mut self.cmd);
-            if !input.trim().is_empty() {
-                self.execute(&input);
+            match self.suggestion.take().and_then(|i| suggestions.get(i)) {
+                Some(pick) => self.execute(&pick.key),
+                None if !input.trim().is_empty() => self.execute(&input),
+                None => {}
             }
             self.cmd_hist_pos = None;
             // The command line stays live, Bloomberg-style.
@@ -768,6 +909,9 @@ impl TerminalApp {
             self.cmd_hist_pos = Some(pos);
             self.cmd = self.cmd_history[pos].clone();
         }
+        if focused && !self.cmd.is_empty() {
+            self.dropdown(ui.ctx(), cmd_rect, &suggestions);
+        }
         let hint = command::hint(&self.cmd);
         p.text(
             pos2(cmd_rect.left() + 2.0, rect.top() + 32.0),
@@ -777,6 +921,59 @@ impl TerminalApp {
             if self.cmd.is_empty() { MUTED } else { TEXT },
         );
         focused
+    }
+
+    /// Security suggestions for what is typed, unless it is a function command.
+    fn suggestions(&self) -> Vec<SearchHit> {
+        let q = self.cmd.trim();
+        if q.is_empty() || matches!(command::parse(q), Some(Command::Function(_) | Command::SymbolFunction(..))) {
+            return Vec::new();
+        }
+        let net: &[SearchHit] = if self.net_hits.0 == q { &self.net_hits.1 } else { &[] };
+        let mut v = markets_view::merged_hits(q, net);
+        v.truncate(8);
+        v
+    }
+
+    fn dropdown(&mut self, ctx: &egui::Context, below: Rect, hits: &[SearchHit]) {
+        if hits.is_empty() {
+            return;
+        }
+        let mut clicked = None;
+        egui::Area::new(egui::Id::new("cmd-suggestions"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(below.left_bottom() + vec2(0.0, 2.0))
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(14, 12, 4))
+                    .stroke(Stroke::new(1.0, AMBER_DIM))
+                    .inner_margin(4.0)
+                    .show(ui, |ui| {
+                        ui.set_width(below.width().min(640.0));
+                        for (i, h) in hits.iter().enumerate() {
+                            let selected = self.suggestion == Some(i);
+                            let text = format!("{:<20} {:<6} {}", h.key, h.class.label(), h.name);
+                            let mut rt = RichText::new(text).font(mono(12.5)).color(markets_view::class_color(h.class));
+                            if selected {
+                                rt = rt.background_color(Color32::from_rgb(80, 60, 0));
+                            }
+                            let r = ui.add(egui::Label::new(rt).extend().sense(egui::Sense::click()));
+                            if r.hovered() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            }
+                            if r.clicked() {
+                                clicked = Some(h.key.clone());
+                            }
+                        }
+                        ui.label(RichText::new("↑/↓ select · Tab complete · Enter load").font(mono(10.5)).color(MUTED));
+                    });
+            });
+        if let Some(key) = clicked {
+            self.cmd.clear();
+            self.suggestion = None;
+            self.execute(&key);
+            self.focus_cmd = true;
+        }
     }
 
     fn bottom_bar(&self, ui: &Ui, rect: Rect) {
@@ -805,7 +1002,13 @@ impl TerminalApp {
             x += g.size().x + 10.0;
         }
         let status = if self.show_perf {
-            format!("UI {:.2} ms  frame {:.1} ms ({:.0} fps)   {}", self.perf_cpu_ms, self.perf_dt_ms, 1000.0 / self.perf_dt_ms.max(0.1), self.status)
+            format!(
+                "UI {:.2} ms  frame {:.1} ms ({:.0} fps)   {}",
+                self.perf_cpu_ms,
+                self.perf_dt_ms,
+                1000.0 / self.perf_dt_ms.max(0.1),
+                self.status
+            )
         } else {
             self.status.clone()
         };
@@ -828,7 +1031,7 @@ impl TerminalApp {
         let mut out = Vec::new();
         ui.add(
             egui::Label::new(
-                RichText::new("SYMBOL       LAST       CHG      CHG%")
+                RichText::new("SECURITY             LAST       CHG    CHG%")
                     .font(mono(11.5))
                     .color(AMBER)
                     .background_color(theme::HEADER),
@@ -838,8 +1041,11 @@ impl TerminalApp {
         let mut remove = None;
         for s in &self.watchlist {
             ui.horizontal(|ui| {
+                let sec = tr_data::security(s);
+                let label = format!("{:<8} {:<6}", sec.ticker, sec.class.yellow_key().label());
                 let r = ui.add(
-                    egui::Label::new(RichText::new(format!("{s:<8}")).font(mono(12.5)).color(AMBER))
+                    egui::Label::new(RichText::new(label).font(mono(12.5)).color(AMBER))
+                        .extend()
                         .sense(egui::Sense::click()),
                 );
                 if r.clicked() {
@@ -851,11 +1057,14 @@ impl TerminalApp {
                 match self.quotes.get(s) {
                     Some(q) => {
                         let c = if q.change() >= 0.0 { theme::UP } else { theme::DOWN };
-                        ui.label(
-                            RichText::new(format!("{:>10.2} {:>+9.2} {:>+8.2}%", q.last, q.change(), q.change_pct()))
-                                .font(mono(12.5))
-                                .color(c),
+                        let d = sec.decimals(q.last);
+                        let text = format!(
+                            "{:>11.d$} {:>9} {:>+7.2}%",
+                            q.last,
+                            markets_view::change_text(&sec, q),
+                            q.change_pct()
                         );
+                        ui.add(egui::Label::new(RichText::new(text).font(mono(12.5)).color(c)).extend());
                     }
                     None => {
                         ui.label(RichText::new("       …").font(mono(12.5)).color(MUTED));
@@ -867,7 +1076,9 @@ impl TerminalApp {
             self.watchlist.retain(|x| *x != s);
         }
         ui.label(
-            RichText::new("WL ADD <TICKER> · right-click to remove · click to chart").font(mono(10.5)).color(MUTED),
+            RichText::new("WL ADD <KEY> (e.g. WL ADD SOLUSD CRNCY) · right-click to remove · click to chart")
+                .font(mono(10.5))
+                .color(MUTED),
         );
         out
     }
@@ -875,7 +1086,12 @@ impl TerminalApp {
     fn help(ui: &mut Ui) {
         const HELP: &str = "\
 COMMAND LINE  <SECURITY> [<FUNCTION>] <GO>   (Enter = <GO>; type anywhere to start)
-  AAPL                 load AAPL in the focused chart (also: AAPL US EQUITY)
+  Market keys: AAPL <EQUITY> · SPY <EQUITY> · SPX <INDEX> · BTCUSD <CRNCY> · EURUSD <CRNCY>
+               US10Y <GOVT> · CL1 <CMDTY> · GC1 <CMDTY>   (the key is optional for known tickers)
+  Typing shows matches across all asset classes: ↑/↓ select, Tab complete, Enter load.
+  WEI                  world markets overview     GC  US Treasury yield curve
+  SECF <query>         security search (e.g. SECF gold cmdty, SECF yen)
+  Crypto charts update live (Binance websocket; Coinbase fallback).
   1 5 15 30 1H 4H D 1W 1M   interval (1m..1 month)      1D 5D 3M 6M YTD 1Y 5Y ALL  ranges
   CANDLE BAR LINE AREA chart type                       LOG  log scale
   SMA 20  EMA 50  VWAP  BB 20 2  RSI 14  MACD 12 26 9   toggle indicators (CLEAR)
@@ -900,7 +1116,8 @@ CHART HOTKEYS (focused chart)
   Alt+T trendline · Alt+H horizontal · Alt+V vertical · Alt+F fib · Esc cancel · Del remove
   F12 frame-time readout (UI CPU ms, frame interval, fps)
 
-DATA  APCA_API_KEY_ID/APCA_API_SECRET_KEY -> Alpaca; otherwise Yahoo; TR_PROVIDER=sample offline.";
+DATA  crypto: Binance/Coinbase · yields: Treasury.gov (FRED) · FX/indices/futures/ETFs/stocks: Yahoo
+      (Alpaca for stocks with APCA_API_KEY_ID/APCA_API_SECRET_KEY) · TR_PROVIDER=sample offline.";
         egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
             ui.label(RichText::new(HELP).font(mono(12.0)).color(TEXT));
         });
@@ -911,6 +1128,25 @@ DATA  APCA_API_KEY_ID/APCA_API_SECRET_KEY -> Alpaca; otherwise Yahoo; TR_PROVIDE
         if visible_wl && self.last_quotes.is_none_or(|t| t.elapsed() > Duration::from_secs(20)) {
             self.worker.send(Request::Quotes(self.watchlist.clone()));
             self.last_quotes = Some(Instant::now());
+        }
+        let visible = |f: fn(&PaneKind) -> bool| self.panes.iter().any(|p| f(&p.kind));
+        if visible(|k| matches!(k, PaneKind::Wei))
+            && self.last_wei.is_none_or(|t| t.elapsed() > Duration::from_secs(20))
+        {
+            self.worker.send(Request::Quotes(markets_view::overview_keys()));
+            self.last_wei = Some(Instant::now());
+        }
+        if visible(|k| matches!(k, PaneKind::Curve))
+            && self.last_curve.is_none_or(|t| t.elapsed() > Duration::from_secs(600))
+        {
+            self.worker.send(Request::YieldCurves);
+            self.last_curve = Some(Instant::now());
+        }
+        if let Some((q, at)) = &self.search_pending
+            && at.elapsed() > Duration::from_millis(300)
+        {
+            self.worker.send(Request::Search(q.clone()));
+            self.search_pending = None;
         }
         if self.last_feed.is_none_or(|t| t.elapsed() > Duration::from_secs(60)) {
             self.worker.send(Request::Latest { limit: 2_000 });
@@ -1010,6 +1246,18 @@ impl eframe::App for TerminalApp {
                         }
                         PaneKind::Watchlist => {}
                         PaneKind::Help => Self::help(&mut child),
+                        PaneKind::Wei => {
+                            actions.extend(markets_view::wei(&mut child, &self.quotes, self.wei_updated.as_deref()))
+                        }
+                        PaneKind::Curve => actions.extend(markets_view::curve(&mut child, self.curves.as_deref())),
+                        PaneKind::Search { query } => {
+                            let hits = if self.net_hits.0 == *query { self.net_hits.1.as_slice() } else { &[] };
+                            let (a, changed) = markets_view::search(&mut child, query, hits);
+                            actions.extend(a);
+                            if changed && query.trim().len() >= 2 {
+                                self.search_pending = Some((query.clone(), Instant::now()));
+                            }
+                        }
                         PaneKind::Chart(_) => unreachable!(),
                     }
                     if matches!(pane.kind, PaneKind::Watchlist) {

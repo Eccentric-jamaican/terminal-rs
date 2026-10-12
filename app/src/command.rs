@@ -5,7 +5,7 @@
 
 use tr_chart::drawings::Tool;
 use tr_chart::scene::ChartType;
-use tr_core::Timeframe;
+use tr_core::{Security, Timeframe, YellowKey};
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum IndicatorSpec {
@@ -48,6 +48,7 @@ impl IndicatorSpec {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
+    /// A market key, e.g. `BTCUSD Curncy`.
     Symbol(String),
     SymbolFunction(String, Function),
     Function(Function),
@@ -149,10 +150,13 @@ pub enum Function {
     NewPane,
     ClosePane,
     Help,
+    /// World equity indices / markets overview.
+    Wei,
+    /// US Treasury yield curve.
+    Curve,
+    /// Security search across asset classes.
+    Search(String),
 }
-
-/// Bloomberg yellow-key suffixes that may follow a ticker and are ignored.
-const MARKET_SECTORS: [&str; 8] = ["US", "EQUITY", "EQ", "INDEX", "CURNCY", "COMDTY", "<GO>", "GO"];
 
 fn num<T: std::str::FromStr>(t: Option<&&str>) -> Option<T> {
     t.and_then(|s| s.parse().ok())
@@ -208,6 +212,9 @@ fn parse_function(head: &str, rest: &[&str]) -> Option<Function> {
         "NEW" => Function::NewPane,
         "CLOSE" => Function::ClosePane,
         "HELP" | "?" | "H" => Function::Help,
+        "WEI" | "MARKETS" | "WORLD" => Function::Wei,
+        "GC" | "YCRV" | "CURVE" | "YC" => Function::Curve,
+        "SECF" | "SEARCH" | "FIND" => Function::Search(joined()),
         "RANGE" => Function::Range(Range::parse(rest.first()?)?),
         // Timeframes win where spellings overlap (`1D`, `1M`); otherwise try a range (`5D`, `YTD`).
         _ => {
@@ -220,32 +227,23 @@ fn parse_function(head: &str, rest: &[&str]) -> Option<Function> {
     })
 }
 
-fn looks_like_ticker(s: &str) -> bool {
-    let core = s.trim_start_matches('^');
-    !core.is_empty()
-        && core.len() <= 12
-        && core.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '=' | '/'))
-        && core.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
-}
-
 /// Parse one command line. Returns `None` for empty or unrecognised input.
 pub fn parse(input: &str) -> Option<Command> {
     let tokens: Vec<&str> = input.split_whitespace().filter(|t| !t.eq_ignore_ascii_case("<GO>")).collect();
     let (&head, rest) = tokens.split_first()?;
-    // A function keyword (or timeframe) wins over a ticker of the same spelling,
-    // except for single letters that are common tickers when followed by nothing.
-    if let Some(f) = parse_function(head, rest) {
+    // `<TICKER> <YELLOW KEY>` is always a security, even if the ticker spells a function.
+    let keyed = match rest {
+        [k, ..] if YellowKey::parse(k).is_some() => true,
+        [us, k, ..] if us.eq_ignore_ascii_case("US") && YellowKey::parse(k).is_some() => true,
+        _ => false,
+    };
+    if !keyed && let Some(f) = parse_function(head, rest) {
         return Some(Command::Function(f));
     }
-    if !looks_like_ticker(head) {
-        return None;
-    }
-    let symbol = head.to_ascii_uppercase().replace('/', ".");
-    let rest: Vec<&str> =
-        rest.iter().copied().filter(|t| !MARKET_SECTORS.contains(&t.to_ascii_uppercase().as_str())).collect();
-    match rest.split_first() {
-        None => Some(Command::Symbol(symbol)),
-        Some((&f, args)) => parse_function(f, args).map(|func| Command::SymbolFunction(symbol, func)),
+    let (sec, used) = Security::resolve_tokens(&tokens)?;
+    match tokens[used..].split_first() {
+        None => Some(Command::Symbol(sec.key())),
+        Some((&f, args)) => parse_function(f, args).map(|func| Command::SymbolFunction(sec.key(), func)),
     }
 }
 
@@ -254,7 +252,10 @@ pub fn hint(input: &str) -> String {
     match parse(input) {
         None if input.trim().is_empty() => "Type a ticker and press <GO> (Enter).  HELP for functions.".into(),
         None => "Unrecognised command".into(),
-        Some(Command::Symbol(s)) => format!("Load {s}"),
+        Some(Command::Symbol(s)) => match Security::parse(&s).and_then(|x| x.name()) {
+            Some(name) => format!("Load {s} — {name}"),
+            None => format!("Load {s}"),
+        },
         Some(Command::SymbolFunction(s, f)) => format!("{s}: {}", describe(&f)),
         Some(Command::Function(f)) => describe(&f),
     }
@@ -299,6 +300,9 @@ fn describe(f: &Function) -> String {
         Function::NewPane => "Split: add a pane".into(),
         Function::ClosePane => "Close focused pane".into(),
         Function::Help => "Help".into(),
+        Function::Wei => "World markets overview".into(),
+        Function::Curve => "US Treasury yield curve".into(),
+        Function::Search(q) => format!("Search securities: {q}"),
     }
 }
 
@@ -308,10 +312,20 @@ mod tests {
 
     #[test]
     fn symbols() {
-        assert_eq!(parse("aapl"), Some(Command::Symbol("AAPL".into())));
-        assert_eq!(parse("AAPL US EQUITY <GO>"), Some(Command::Symbol("AAPL".into())));
-        assert_eq!(parse("brk/b"), Some(Command::Symbol("BRK.B".into())));
-        assert_eq!(parse("^GSPC"), Some(Command::Symbol("^GSPC".into())));
+        let sym = |s: &str| Some(Command::Symbol(s.into()));
+        assert_eq!(parse("aapl"), sym("AAPL US Equity"));
+        assert_eq!(parse("AAPL US EQUITY <GO>"), sym("AAPL US Equity"));
+        assert_eq!(parse("brk/b"), sym("BRK.B US Equity"));
+        assert_eq!(parse("BTCUSD <CRNCY>"), sym("BTCUSD Curncy"));
+        assert_eq!(parse("EURUSD <CRNCY>"), sym("EURUSD Curncy"));
+        assert_eq!(parse("US10Y <GOVT>"), sym("US10Y Govt"));
+        assert_eq!(parse("CL1 <CMDTY>"), sym("CL1 Comdty"));
+        assert_eq!(parse("SPX <INDEX>"), sym("SPX Index"));
+        assert_eq!(parse("AAPL <EQUITY>"), sym("AAPL US Equity"));
+        assert_eq!(parse("btcusd"), sym("BTCUSD Curncy"));
+        // A yellow key makes a function-like word a ticker.
+        assert_eq!(parse("LINE <EQUITY>"), sym("LINE US Equity"));
+        assert_eq!(parse("LINE"), Some(Command::Function(Function::ChartType(ChartType::Line))));
         assert_eq!(parse("   "), None);
         assert_eq!(parse("123abc"), None);
     }
@@ -347,10 +361,17 @@ mod tests {
 
     #[test]
     fn symbol_with_function() {
-        assert_eq!(parse("NVDA CONG <GO>"), Some(Command::SymbolFunction("NVDA".into(), Function::Congress)));
+        assert_eq!(parse("NVDA CONG <GO>"), Some(Command::SymbolFunction("NVDA US Equity".into(), Function::Congress)));
+        assert_eq!(
+            parse("BTCUSD CRNCY 5"),
+            Some(Command::SymbolFunction("BTCUSD Curncy".into(), Function::Timeframe(Timeframe::M5)))
+        );
+        assert_eq!(parse("WEI"), Some(Command::Function(Function::Wei)));
+        assert_eq!(parse("GC"), Some(Command::Function(Function::Curve)));
+        assert_eq!(parse("SECF gold"), Some(Command::Function(Function::Search("gold".into()))));
         assert_eq!(
             parse("AAPL US EQUITY 1W"),
-            Some(Command::SymbolFunction("AAPL".into(), Function::Timeframe(Timeframe::W1)))
+            Some(Command::SymbolFunction("AAPL US Equity".into(), Function::Timeframe(Timeframe::W1)))
         );
         assert_eq!(parse("AAPL WHATEVER"), None);
     }
@@ -358,7 +379,8 @@ mod tests {
     #[test]
     fn hints() {
         assert_eq!(hint("5"), "Interval 5 minutes");
-        assert_eq!(hint("msft"), "Load MSFT");
+        assert_eq!(hint("msft"), "Load MSFT US Equity — Microsoft Corp");
+        assert_eq!(hint("US10Y GOVT"), "Load US10Y Govt — US Treasury 10 Year");
         assert!(hint("").contains("ticker"));
     }
 

@@ -6,6 +6,7 @@ mod chart_view;
 mod command;
 mod congress_view;
 mod layout;
+mod markets_view;
 mod theme;
 mod worker;
 

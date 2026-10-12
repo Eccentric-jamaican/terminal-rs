@@ -10,7 +10,7 @@ use tr_chart::scale;
 use tr_chart::scene::{self, ChartType, Overlay, PricePane, SeriesGpu};
 use tr_chart::viewport::{PriceScale, Viewport};
 use tr_congress::{Trade, TxType};
-use tr_core::{Bar, Timeframe};
+use tr_core::{AssetClass, Bar, Security, Timeframe};
 
 use crate::command::{IndicatorSpec, Range};
 use crate::theme::{self, AMBER, AMBER_DIM, MUTED, TEXT, mono};
@@ -58,15 +58,23 @@ pub struct ChartState {
     pending_range: Option<Range>,
     draw: DrawState,
     hover_marker: Option<usize>,
+    /// Resolved security for `symbol`.
+    sec: Security,
+    last_live: Option<std::time::Instant>,
+    last_indicator_req: Option<std::time::Instant>,
 }
 
 impl ChartState {
     pub fn new(id: PaneId, symbol: &str, tf: Timeframe) -> Self {
         Self {
             id,
-            symbol: symbol.to_ascii_uppercase(),
+            symbol: tr_data::security(symbol).key(),
             tf,
-            chart_type: ChartType::Candles,
+            chart_type: if tr_data::security(symbol).class == AssetClass::Govt {
+                ChartType::Line
+            } else {
+                ChartType::Candles
+            },
             log: false,
             magnet: false,
             show_volume: true,
@@ -90,6 +98,9 @@ impl ChartState {
             pending_range: None,
             draw: DrawState::default(),
             hover_marker: None,
+            sec: tr_data::security(symbol),
+            last_live: None,
+            last_indicator_req: None,
         }
     }
 
@@ -108,6 +119,10 @@ impl ChartState {
         self.manual_scale = None;
         self.compare_line = None;
         self.markers.clear();
+        // Never show the previous symbol's bars under the new title.
+        self.bars = Arc::new(Vec::new());
+        self.gpu = None;
+        self.built.clear();
         w.send(Request::History {
             pane: self.id,
             generation: self.generation,
@@ -115,11 +130,21 @@ impl ChartState {
             tf: self.tf,
             limit: initial_limit(self.tf),
         });
-        w.send(Request::Markers { pane: self.id, symbol: self.symbol.clone() });
+        self.last_live = None;
+        if self.sec.has_congress_trades() {
+            w.send(Request::Markers { pane: self.id, symbol: self.symbol.clone() });
+        }
     }
 
     pub fn set_symbol(&mut self, symbol: &str, w: &Worker) {
-        self.symbol = symbol.to_ascii_uppercase();
+        let sec = tr_data::security(symbol);
+        if sec.class == AssetClass::Govt {
+            self.chart_type = ChartType::Line;
+        } else if self.sec.class == AssetClass::Govt {
+            self.chart_type = ChartType::Candles;
+        }
+        self.symbol = sec.key();
+        self.sec = sec;
         self.draw = DrawState::default();
         self.load(w);
     }
@@ -258,10 +283,14 @@ impl ChartState {
         prepended: usize,
         from_cache: bool,
         exhausted: bool,
+        live: bool,
         w: &Worker,
     ) {
         if generation != self.generation {
             return;
+        }
+        if live {
+            self.last_live = Some(std::time::Instant::now());
         }
         let old_len = self.bars.len();
         let new_len = bars.len();
@@ -285,8 +314,16 @@ impl ChartState {
             }
         }
         self.apply_range();
-        self.request_indicators(w);
-        self.request_compare(w);
+        // Live ticks only move the last bar: refresh indicators at most every 1.5 s and
+        // leave the compare series alone.
+        let due = self.last_indicator_req.is_none_or(|t| t.elapsed().as_millis() >= 1500);
+        if !live || due {
+            self.request_indicators(w);
+            self.last_indicator_req = Some(std::time::Instant::now());
+        }
+        if !live {
+            self.request_compare(w);
+        }
     }
 
     pub fn on_history_error(&mut self, generation: u64, error: String) {
@@ -359,7 +396,7 @@ impl ChartState {
         let header = Rect::from_min_size(rect.min, vec2(rect.width(), HEADER_H));
         painter.rect_filled(header, 0.0, theme::HEADER);
         let mut x = header.left() + 6.0;
-        let title = format!("{} US Equity", self.symbol);
+        let title = self.symbol.clone();
         let g = painter.layout_no_wrap(title, mono(12.5), AMBER);
         painter.galley(pos2(x, header.center().y - g.size().y / 2.0), g.clone(), AMBER);
         x += g.size().x + 12.0;
@@ -394,7 +431,7 @@ impl ChartState {
             let label = ct.label();
             let r =
                 Rect::from_min_size(pos2(x, header.top() + 1.0), vec2(label.len() as f32 * 7.2 + 6.0, HEADER_H - 2.0));
-            if r.right() > header.right() - 4.0 {
+            if r.right() > header.right() - 64.0 {
                 break;
             }
             let resp = ui.interact(r, ui.id().with((self.id, "ct", label)), Sense::click());
@@ -411,6 +448,16 @@ impl ChartState {
                 clicked = true;
             }
             x = r.right() + 2.0;
+        }
+
+        if self.last_live.is_some_and(|t| t.elapsed().as_secs() < 5) {
+            painter.text(
+                pos2(header.right() - 8.0, header.center().y),
+                Align2::RIGHT_CENTER,
+                "● LIVE",
+                mono(11.0),
+                theme::UP,
+            );
         }
 
         // Bottom quick-range row.
@@ -594,7 +641,7 @@ impl ChartState {
         let price_painter = ui.painter_at(price_rect);
         let ticks = scale::price_ticks(scale.lo, scale.hi, (price_rect.height() / 42.0).max(2.0) as usize);
         let step = if ticks.len() > 1 { ticks[1] - ticks[0] } else { 1.0 };
-        let dec = scale::decimals_for(step);
+        let dec = scale::decimals_for(step).max(self.sec.decimals(scale.hi).min(3));
         for t in &ticks {
             let y = price_rect.top() + scale.y_of(*t) as f32;
             price_painter.hline(price_rect.x_range(), y, Stroke::new(1.0, theme::GRID));
@@ -701,7 +748,7 @@ impl ChartState {
                 axis_painter.text(
                     tag.left_center() + vec2(5.0, 0.0),
                     Align2::LEFT_CENTER,
-                    scale::format_price(last.close, dec.max(2)),
+                    scale::format_price(last.close, self.sec.decimals(last.close)),
                     mono(11.0),
                     Color32::BLACK,
                 );
@@ -732,7 +779,7 @@ impl ChartState {
                 axis_painter.text(
                     tag.left_center() + vec2(5.0, 0.0),
                     Align2::LEFT_CENTER,
-                    scale::format_price(price, dec.max(2)),
+                    scale::format_price(price, self.sec.decimals(price)),
                     mono(11.0),
                     TEXT,
                 );
@@ -762,7 +809,7 @@ impl ChartState {
         let prev = if i > 0 { self.bars[i - 1].close } else { b.open };
         let chg = b.close - prev;
         let col = if chg >= 0.0 { theme::UP } else { theme::DOWN };
-        let dec = if b.close < 1.0 { 4 } else { 2 };
+        let dec = self.sec.decimals(b.close);
         let mut x = price_rect.left() + 6.0;
         let y = price_rect.top() + 4.0;
         let put = |text: String, color: Color32, x: &mut f32| {
@@ -770,7 +817,7 @@ impl ChartState {
             p.galley(pos2(*x, y), g.clone(), color);
             *x += g.size().x + 8.0;
         };
-        put(format!("{} · {}", self.symbol, self.tf), AMBER, &mut x);
+        put(format!("{} · {}", self.sec.ticker, self.tf), AMBER, &mut x);
         for (k, val) in [("O", b.open), ("H", b.high), ("L", b.low), ("C", b.close)] {
             put(format!("{k}{val:.dec$}"), col, &mut x);
         }
