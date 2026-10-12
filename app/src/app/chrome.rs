@@ -20,10 +20,10 @@ use crate::widgets::{self, Icon};
 
 /// Default toolbar height; on macOS it matches a unified `NSToolbar` so the traffic lights
 /// centre in it. The live value comes from [`TerminalApp::toolbar_h`].
-pub const TOOLBAR_H: f32 = if cfg!(target_os = "macos") { tr_macos::TITLEBAR_HEIGHT } else { 44.0 };
+pub const TOOLBAR_H: f32 = if cfg!(target_os = "macos") { tr_macos::TITLEBAR_HEIGHT } else { 34.0 };
 /// Default space kept clear for the traffic lights when the sidebar is collapsed.
 pub const TRAFFIC_INSET: f32 = if cfg!(target_os = "macos") { tr_macos::TRAFFIC_LIGHTS_WIDTH } else { 0.0 };
-pub const STATUS_H: f32 = 24.0;
+pub const STATUS_H: f32 = 22.0;
 pub const SIDEBAR_W: f32 = 232.0;
 const ROW_H: f32 = 24.0;
 const MAC: bool = cfg!(target_os = "macos");
@@ -54,7 +54,7 @@ impl TerminalApp {
         match self.chrome {
             Some(c) if c.titlebar_height > 0.0 => c.titlebar_height.max(TOOLBAR_H),
             // Full screen: no title bar strip.
-            Some(_) => 44.0,
+            Some(_) => 34.0,
             None => TOOLBAR_H,
         }
     }
@@ -79,7 +79,7 @@ impl TerminalApp {
         let mut x = rect.left() + left_inset + 8.0;
 
         // Sidebar toggle.
-        let mut tb = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(pos2(x, cy - 13.0), vec2(30.0, 26.0))));
+        let mut tb = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(pos2(x, cy - 11.0), vec2(26.0, 22.0))));
         if widgets::icon_button(
             &mut tb,
             Icon::Sidebar,
@@ -90,25 +90,28 @@ impl TerminalApp {
         {
             self.sidebar_open = !self.sidebar_open;
         }
-        x += 38.0;
+        x += 32.0;
 
-        // Window title, macOS toolbar style.
-        let title = p.layout_no_wrap("terminal-rs".into(), ui_font(13.5), text());
-        let subtitle = p.layout_no_wrap(self.provider_label(), ui_font(10.5), muted());
-        let tw = title.size().x.max(subtitle.size().x);
-        p.galley(pos2(x, cy - 15.0), title, text());
-        p.galley(pos2(x, cy + 1.0), subtitle, muted());
-        x += tw + 16.0;
+        // Data source chip (the window title itself is redundant in a compact toolbar).
+        let live = !self.provider.eq_ignore_ascii_case("sample");
+        let chip_text = p.layout_no_wrap(if live { "Live" } else { "Offline" }.into(), ui_font(11.0), muted());
+        let chip = Rect::from_min_size(pos2(x, cy - 9.0), vec2(chip_text.size().x + 20.0, 18.0));
+        p.rect_filled(chip, 9.0, theme::control());
+        p.circle_filled(pos2(chip.left() + 8.0, cy), 3.0, if live { theme::up() } else { amber() });
+        p.galley(pos2(chip.left() + 14.0, cy - chip_text.size().y / 2.0), chip_text, muted());
+        ui.interact(chip, Id::new("source-chip"), Sense::hover()).on_hover_text(self.provider_label());
+        x = chip.right() + 10.0;
 
-        // Right-hand cluster, laid out from the right edge.
+        // Right-hand cluster, laid out from the right edge: one-line clock (UTC on hover).
         let now = chrono::Local::now();
-        let clock = p.layout_no_wrap(now.format("%a %d %b  %H:%M:%S").to_string(), mono(12.0), text());
-        let utc = p.layout_no_wrap(format!("{} UTC", chrono::Utc::now().format("%H:%M")), mono(10.5), muted());
-        let cw = clock.size().x.max(utc.size().x);
-        let mut right = rect.right() - 12.0;
-        p.galley(pos2(right - clock.size().x, cy - 14.0), clock, text());
-        p.galley(pos2(right - utc.size().x, cy + 2.0), utc, muted());
-        right -= cw + 12.0;
+        let clock = p.layout_no_wrap(now.format("%a %d %b %H:%M:%S").to_string(), mono(11.5), text());
+        let cw = clock.size().x;
+        let mut right = rect.right() - 10.0;
+        let clock_r = Rect::from_min_size(pos2(right - cw, cy - clock.size().y / 2.0), clock.size());
+        p.galley(clock_r.min, clock, text());
+        ui.interact(clock_r, Id::new("clock"), Sense::hover())
+            .on_hover_text(format!("{} UTC", chrono::Utc::now().format("%H:%M:%S")));
+        right -= cw + 10.0;
 
         let unread = self.alerts.iter().filter(|a| !a.seen).count();
         let buttons: [(Icon, &str, bool); 3] = [
@@ -117,13 +120,13 @@ impl TerminalApp {
             (Icon::Refresh, "Refresh Congress Filings (F6)", false),
         ];
         for (icon, tip, active) in buttons {
-            right -= 32.0;
-            let r = Rect::from_min_size(pos2(right, cy - 13.0), vec2(30.0, 26.0));
+            right -= 28.0;
+            let r = Rect::from_min_size(pos2(right, cy - 11.0), vec2(26.0, 22.0));
             let mut b = ui.new_child(UiBuilder::new().max_rect(r));
             let resp = widgets::icon_button(&mut b, icon, tip, active);
             if icon == Icon::Bell && unread > 0 {
-                let c = pos2(r.right() - 7.0, r.top() + 6.0);
-                p.circle_filled(c, 6.5, theme::down());
+                let c = pos2(r.right() - 5.0, r.top() + 5.0);
+                p.circle_filled(c, 6.0, theme::down());
                 p.text(c, Align2::CENTER_CENTER, unread.min(99).to_string(), ui_font(8.5), Color32::WHITE);
             }
             if resp.clicked() {
@@ -141,25 +144,21 @@ impl TerminalApp {
 
         // Layout picker.
         let labels: Vec<&str> = Layout::ALL.iter().map(|l| l.label()).collect();
-        let seg_w = labels
-            .iter()
-            .map(|l| p.layout_no_wrap((*l).to_string(), ui_font(11.5), text()).size().x + 16.0)
-            .sum::<f32>()
-            + 4.0;
+        let seg_w = widgets::segmented_width(ui, &labels, 20.0);
         let show_layout = right - seg_w - x > 320.0;
         if show_layout {
             right -= seg_w;
-            let r = Rect::from_min_size(pos2(right, cy - 12.0), vec2(seg_w, 24.0));
+            let r = Rect::from_min_size(pos2(right, cy - 10.0), vec2(seg_w, 20.0));
             let mut s = ui.new_child(UiBuilder::new().max_rect(r));
             let sel = self.preset.and_then(|p| Layout::ALL.iter().position(|l| *l == p));
-            if let Some(i) = widgets::segmented(&mut s, "layout", &labels, sel, 24.0) {
+            if let Some(i) = widgets::segmented(&mut s, "layout", &labels, sel, 20.0) {
                 self.apply_preset(Layout::ALL[i]);
             }
             s.interact(r, Id::new("layout-tip"), Sense::hover()).on_hover_text("Pane layout (LAYOUT 1|2|2H|3|4|6)");
             right -= 12.0;
         }
 
-        let field = Rect::from_min_max(pos2(x, cy - 14.0), pos2(right.max(x + 160.0).min(x + 860.0), cy + 14.0));
+        let field = Rect::from_min_max(pos2(x, cy - 11.0), pos2(right.max(x + 160.0).min(x + 860.0), cy + 11.0));
         self.command_field(ui, field)
     }
 
@@ -200,11 +199,11 @@ impl TerminalApp {
         let had_focus = ui.ctx().memory(|m| m.has_focus(id));
         let ring = anim::spring_bool(ui.ctx(), id.with("ring"), had_focus);
         let p = ui.painter();
-        let radius = CornerRadius::same(8);
+        let radius = CornerRadius::same(6);
         if ring > 0.01 {
             p.rect_stroke(
                 field.expand(2.0),
-                CornerRadius::same(10),
+                CornerRadius::same(8),
                 Stroke::new(3.0, theme::accent().gamma_multiply(0.45 * ring)),
                 StrokeKind::Outside,
             );
@@ -218,7 +217,7 @@ impl TerminalApp {
             muted(),
         );
         // A small "GO" key cap at the trailing edge, Bloomberg-style.
-        let go = Rect::from_center_size(pos2(field.right() - 22.0, field.center().y), vec2(32.0, 18.0));
+        let go = Rect::from_center_size(pos2(field.right() - 18.0, field.center().y), vec2(28.0, 15.0));
         p.rect_filled(go, 4.0, if self.cmd.trim().is_empty() { theme::control_hover() } else { amber() });
         p.text(
             go.center(),
@@ -233,12 +232,12 @@ impl TerminalApp {
         let mut child = ui.new_child(UiBuilder::new().max_rect(inner));
         let te = egui::TextEdit::singleline(&mut self.cmd)
             .id(id)
-            .font(mono(13.5))
+            .font(mono(12.5))
             .text_color(amber())
             .vertical_align(egui::Align::Center)
             .hint_text(
                 RichText::new("Search or type a command — BTCUSD <CRNCY> · US10Y GOVT · CL1 CMDTY · AAPL · WEI · GC")
-                    .font(ui_font(13.0))
+                    .font(ui_font(12.0))
                     .color(muted()),
             )
             .desired_width(inner.width())

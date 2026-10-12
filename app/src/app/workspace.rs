@@ -163,7 +163,7 @@ fn draw_compass(layer: &egui::Painter, rect: Rect, current: Zone, noop: bool) {
 }
 
 fn tab_h() -> f32 {
-    dp(28.0)
+    dp(26.0)
 }
 
 fn expand_home(p: &str) -> PathBuf {
@@ -891,8 +891,16 @@ impl TerminalApp {
 
         // Trailing buttons: add panel (as tab) and the group menu.
         let btn =
-            |i: f32| Rect::from_min_size(pos2(strip.right() - 28.0 * i - 2.0, strip.top() + 2.0), vec2(26.0, th - 4.0));
+            |i: f32| Rect::from_min_size(pos2(strip.right() - 26.0 * i - 2.0, strip.top() + 2.0), vec2(24.0, th - 4.0));
         let tabs_right = btn(2.0).left() - 4.0;
+        // A chart's interval and type controls share the tab strip when there is room,
+        // which saves the chart a whole header row.
+        let chart_idx = self.idx(active).filter(|&i| matches!(self.panes[i].kind, PaneKind::Chart(_)));
+        let ctrl_w = if chart_idx.is_some() { crate::chart_view::ChartState::controls_width(ui) } else { 0.0 };
+        let min_tabs = 120.0 * g.panes.len().clamp(1, 3) as f32;
+        let controls_fit = chart_idx.is_some() && tabs_right - strip.left() - ctrl_w - 10.0 >= min_tabs;
+        let controls_left = tabs_right - ctrl_w;
+        let tabs_right = if controls_fit { controls_left - 10.0 } else { tabs_right };
         let press = ui.input(|i| if i.pointer.primary_pressed() { i.pointer.press_origin() } else { None });
         let mut x = strip.left() + 4.0;
         let n = g.panes.len().max(1) as f32;
@@ -1041,6 +1049,28 @@ impl TerminalApp {
             }
             tab_menu(ui, active, link, cmds);
         });
+
+        if let Some(ci) = chart_idx {
+            let worker = &self.worker;
+            if let PaneKind::Chart(c) = &mut self.panes[ci].kind {
+                c.controls_in_strip = controls_fit;
+                if controls_fit {
+                    let r = Rect::from_min_size(
+                        pos2(controls_left, strip.center().y - crate::chart_view::CONTROL_H / 2.0),
+                        vec2(ctrl_w, crate::chart_view::CONTROL_H),
+                    );
+                    let mut child = ui.new_child(
+                        UiBuilder::new()
+                            .max_rect(r)
+                            .layout(egui::Layout::left_to_right(egui::Align::Center))
+                            .id_salt(("strip-controls", active)),
+                    );
+                    if c.controls(&mut child, worker) {
+                        self.focus = active;
+                    }
+                }
+            }
+        }
 
         // Content.
         let content = Rect::from_min_max(pos2(inner.left(), strip.bottom()), inner.max);

@@ -23,8 +23,11 @@ use crate::worker::{BuiltIndicator, PaneId, Request, Worker, initial_limit};
 
 const AXIS_W: f32 = 66.0;
 const TIME_H: f32 = 16.0;
-const HEADER_H: f32 = 32.0;
-const RANGE_H: f32 = 20.0;
+/// Fallback header row, used when the pane's tab strip has no room for the controls.
+const HEADER_H: f32 = 24.0;
+const RANGE_H: f32 = 18.0;
+/// Height of the interval / chart-type segmented controls.
+pub const CONTROL_H: f32 = 20.0;
 const DEFAULT_VISIBLE: usize = 160;
 
 #[derive(Default)]
@@ -71,6 +74,9 @@ pub struct ChartState {
     pub actions: Vec<Action>,
     /// False while a pane is being dragged over the workspace: no crosshair or hover cards.
     pub hover_enabled: bool,
+    /// The workspace drew this chart's controls in the pane's tab strip, so skip the
+    /// header row and give the plot the space.
+    pub controls_in_strip: bool,
 }
 
 impl ChartState {
@@ -112,6 +118,7 @@ impl ChartState {
             last_indicator_req: None,
             actions: Vec::new(),
             hover_enabled: true,
+            controls_in_strip: false,
         }
     }
 
@@ -399,6 +406,33 @@ impl ChartState {
     // ---- rendering --------------------------------------------------------------------
 
     /// Draw the pane into `rect`. Returns true if the pane was clicked (focus request).
+    /// Width of [`Self::controls`] (interval and chart-type segmented controls).
+    pub fn controls_width(ui: &Ui) -> f32 {
+        let tf: Vec<&str> = Timeframe::ALL.iter().map(|t| t.label()).collect();
+        let ct: Vec<&str> = ChartType::ALL.iter().map(|c| c.label()).collect();
+        widgets::segmented_width(ui, &tf, CONTROL_H) + widgets::segmented_width(ui, &ct, CONTROL_H) + 8.0
+    }
+
+    /// Interval and chart-type controls, laid out left to right in `ui`. Returns whether
+    /// one was clicked.
+    pub fn controls(&mut self, ui: &mut Ui, w: &Worker) -> bool {
+        let mut clicked = false;
+        let tf_labels: Vec<&str> = Timeframe::ALL.iter().map(|t| t.label()).collect();
+        let selected_tf = Timeframe::ALL.iter().position(|t| *t == self.tf);
+        if let Some(i) = widgets::segmented(ui, (self.id, "tf"), &tf_labels, selected_tf, CONTROL_H) {
+            self.set_timeframe(Timeframe::ALL[i], w);
+            clicked = true;
+        }
+        ui.add_space(8.0);
+        let ct_labels: Vec<&str> = ChartType::ALL.iter().map(|c| c.label()).collect();
+        let selected_ct = ChartType::ALL.iter().position(|c| *c == self.chart_type);
+        if let Some(i) = widgets::segmented(ui, (self.id, "ct"), &ct_labels, selected_ct, CONTROL_H) {
+            self.chart_type = ChartType::ALL[i];
+            clicked = true;
+        }
+        clicked
+    }
+
     pub fn show(&mut self, ui: &mut Ui, rect: Rect, focused: bool, w: &Worker) -> bool {
         let painter = ui.painter_at(rect);
         // Sits under a tab strip inside a card: square top, rounded bottom.
@@ -406,53 +440,49 @@ impl ChartState {
         painter.rect_filled(rect, CornerRadius { nw: 0, ne: 0, sw: r, se: r }, theme::card());
         let mut clicked = false;
 
-        // Header: ticker, yellow key and name, then segmented interval and type controls.
-        let header = Rect::from_min_size(rect.min, vec2(rect.width(), HEADER_H));
-        painter.rect_filled(header, 0.0, theme::card());
-        painter.hline(header.x_range(), header.bottom(), Stroke::new(1.0, theme::border()));
-        let mut hui = ui.new_child(
-            UiBuilder::new()
-                .max_rect(header.shrink2(vec2(10.0, 0.0)))
-                .layout(egui::Layout::left_to_right(egui::Align::Center))
-                .id_salt((self.id, "header")),
-        );
-        hui.spacing_mut().item_spacing.x = 8.0;
-        hui.label(RichText::new(&self.sec.ticker).font(mono(13.0)).color(amber()));
-        hui.label(RichText::new(self.sec.class.yellow_key().label()).font(ui_font(12.0)).color(muted()));
-        if let Some(name) = self.sec.name().filter(|_| header.width() > 760.0) {
-            hui.label(RichText::new(name).font(ui_font(12.0)).color(muted()));
-        }
-        hui.add_space(4.0);
-        let tf_labels: Vec<&str> = Timeframe::ALL.iter().map(|t| t.label()).collect();
-        let selected_tf = Timeframe::ALL.iter().position(|t| *t == self.tf);
-        if hui.available_width() > 300.0
-            && let Some(i) = widgets::segmented(&mut hui, (self.id, "tf"), &tf_labels, selected_tf, 22.0)
-        {
-            self.set_timeframe(Timeframe::ALL[i], w);
-            clicked = true;
-        }
-        let ct_labels: Vec<&str> = ChartType::ALL.iter().map(|c| c.label()).collect();
-        let selected_ct = ChartType::ALL.iter().position(|c| *c == self.chart_type);
-        if hui.available_width() > 260.0
-            && let Some(i) = widgets::segmented(&mut hui, (self.id, "ct"), &ct_labels, selected_ct, 22.0)
-        {
-            self.chart_type = ChartType::ALL[i];
-            clicked = true;
+        // Controls live in the tab strip when it has room; otherwise a slim header row.
+        let header_h = if self.controls_in_strip { 0.0 } else { HEADER_H };
+        let header = Rect::from_min_size(rect.min, vec2(rect.width(), header_h));
+        if header_h > 0.0 {
+            painter.hline(header.x_range(), header.bottom(), Stroke::new(1.0, theme::border()));
+            let mut hui = ui.new_child(
+                UiBuilder::new()
+                    .max_rect(header.shrink2(vec2(8.0, 0.0)))
+                    .layout(egui::Layout::left_to_right(egui::Align::Center))
+                    .id_salt((self.id, "header")),
+            );
+            hui.spacing_mut().item_spacing.x = 6.0;
+            hui.label(RichText::new(&self.sec.ticker).font(mono(12.0)).color(amber()));
+            if hui.available_width() > Self::controls_width(&hui) {
+                clicked |= self.controls(&mut hui, w);
+            } else {
+                // Narrow pane: the same controls as compact menus.
+                hui.menu_button(RichText::new(self.tf.label()).font(ui_font(11.5)), |ui| {
+                    for tf in Timeframe::ALL {
+                        if ui.radio(self.tf == tf, tf.label()).clicked() {
+                            self.set_timeframe(tf, w);
+                            clicked = true;
+                            ui.close();
+                        }
+                    }
+                });
+                hui.menu_button(RichText::new(self.chart_type.label()).font(ui_font(11.5)), |ui| {
+                    for ct in ChartType::ALL {
+                        if ui.radio(self.chart_type == ct, ct.label()).clicked() {
+                            self.chart_type = ct;
+                            clicked = true;
+                            ui.close();
+                        }
+                    }
+                });
+            }
         }
         if self.last_live.is_some_and(|t| t.elapsed().as_secs() < 5) {
+            // Pulsing live dot in the plot's top-right corner (clear of the price axis labels).
             let pulse = 0.6 + 0.4 * ((ui.input(|i| i.time) * 3.0).sin() as f32).abs();
-            painter.circle_filled(
-                pos2(header.right() - 52.0, header.center().y),
-                3.5,
-                theme::up().gamma_multiply(pulse),
-            );
-            painter.text(
-                pos2(header.right() - 12.0, header.center().y),
-                Align2::RIGHT_CENTER,
-                "LIVE",
-                ui_font(11.0),
-                theme::up(),
-            );
+            let c = pos2(rect.right() - AXIS_W + 12.0, header.bottom() + 10.0);
+            painter.circle_filled(c, 3.0, theme::up().gamma_multiply(pulse));
+            painter.text(c + vec2(7.0, 0.0), Align2::LEFT_CENTER, "LIVE", ui_font(10.0), theme::up());
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
         }
 

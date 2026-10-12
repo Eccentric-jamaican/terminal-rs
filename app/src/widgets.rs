@@ -17,10 +17,10 @@ pub fn segmented(
     selected: Option<usize>,
     height: f32,
 ) -> Option<usize> {
-    let font = ui_font(11.5);
+    let (font, pad) = segment_style(height);
     let widths: Vec<f32> = labels
         .iter()
-        .map(|l| ui.painter().layout_no_wrap((*l).to_string(), font.clone(), Color32::WHITE).size().x + 16.0)
+        .map(|l| ui.painter().layout_no_wrap((*l).to_string(), font.clone(), Color32::WHITE).size().x + pad)
         .collect();
     let total: f32 = widths.iter().sum::<f32>() + 4.0;
     let (rect, _) = ui.allocate_exact_size(vec2(total, height), Sense::hover());
@@ -62,6 +62,21 @@ pub fn segmented(
         }
     }
     clicked
+}
+
+/// Font and per-segment padding: compact (toolbar-height) controls are tighter.
+fn segment_style(height: f32) -> (egui::FontId, f32) {
+    if height <= 20.0 { (ui_font(11.0), 12.0) } else { (ui_font(11.5), 16.0) }
+}
+
+/// Width [`segmented`] will take for `labels` at `height`.
+pub fn segmented_width(ui: &Ui, labels: &[&str], height: f32) -> f32 {
+    let (font, pad) = segment_style(height);
+    labels
+        .iter()
+        .map(|l| ui.painter().layout_no_wrap((*l).to_string(), font.clone(), Color32::WHITE).size().x + pad)
+        .sum::<f32>()
+        + 4.0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,7 +220,9 @@ pub fn draw_icon(p: &egui::Painter, r: Rect, icon: Icon, color: Color32) {
 
 /// Borderless toolbar button with an animated hover/press wash.
 pub fn icon_button(ui: &mut Ui, icon: Icon, tooltip: &str, active: bool) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(30.0, 26.0), Sense::click());
+    // Fill the space given (toolbars pass compact rects), up to a 28×24 button.
+    let size = vec2(ui.available_width().clamp(18.0, 28.0), ui.available_height().clamp(18.0, 24.0));
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let t = anim::spring_bool(ui.ctx(), resp.id.with("hover"), resp.hovered() || active);
     if t > 0.01 {
         let base = if active { theme::accent_wash() } else { theme::control_hover() };

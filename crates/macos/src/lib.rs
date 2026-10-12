@@ -1,7 +1,7 @@
 //! Native macOS window chrome. Everything here is a no-op on other platforms.
 //!
 //! - [`style_window`]: transparent full-size title bar with the traffic lights inset by an
-//!   empty unified `NSToolbar`, plus an `NSVisualEffectView` (sidebar material) behind the
+//!   empty compact unified `NSToolbar`, plus an `NSVisualEffectView` (sidebar material) behind the
 //!   app's content view so translucent regions show system vibrancy.
 //! - [`chrome_metrics`]: the live height of that title bar region and the width taken by
 //!   the traffic lights, so app content never sits under the system's drag region.
@@ -11,8 +11,8 @@ use std::ffi::c_void;
 
 /// Height of the unified title bar/toolbar region the app should leave for the system,
 /// and the horizontal space taken by the traffic lights, in points.
-pub const TITLEBAR_HEIGHT: f32 = 52.0;
-pub const TRAFFIC_LIGHTS_WIDTH: f32 = 78.0;
+pub const TITLEBAR_HEIGHT: f32 = 38.0;
+pub const TRAFFIC_LIGHTS_WIDTH: f32 = 76.0;
 
 /// Measured title bar geometry, in points.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -49,7 +49,8 @@ mod imp {
         window.setTitlebarAppearsTransparent(true);
         let toolbar = NSToolbar::initWithIdentifier(NSToolbar::alloc(mtm), &NSString::from_str("terminal-rs.toolbar"));
         window.setToolbar(Some(&toolbar));
-        window.setToolbarStyle(NSWindowToolbarStyle::Unified);
+        // Compact unified toolbar: one slim row shared with the traffic lights.
+        window.setToolbarStyle(NSWindowToolbarStyle::UnifiedCompact);
         if vibrancy {
             let Some(content) = window.contentView() else { return true };
             let frame = content.frame();
