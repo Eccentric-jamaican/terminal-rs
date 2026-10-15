@@ -169,7 +169,7 @@ fn tab_h() -> f32 {
 
 fn expand_home(p: &str) -> PathBuf {
     match p.strip_prefix("~/") {
-        Some(rest) => std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join(rest),
+        Some(rest) => crate::worker::home_dir().unwrap_or_default().join(rest),
         None => PathBuf::from(p),
     }
 }
@@ -838,8 +838,7 @@ impl TerminalApp {
             }
             LayoutOp::OpenFolder => {
                 std::fs::create_dir_all(&self.store.dir)?;
-                let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-                std::process::Command::new(opener).arg(&self.store.dir).spawn()?;
+                crate::worker::open_path(&self.store.dir)?;
                 Ok(format!("Opened {}", self.store.dir.display()))
             }
         })();

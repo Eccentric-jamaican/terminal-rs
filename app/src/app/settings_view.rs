@@ -477,7 +477,7 @@ impl TerminalApp {
 
     fn theme_op(&mut self, op: &str, idx: usize) {
         let expand = |p: &str| match p.strip_prefix("~/") {
-            Some(rest) => std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default().join(rest),
+            Some(rest) => crate::worker::home_dir().unwrap_or_default().join(rest),
             None => p.into(),
         };
         let name = self.themes[idx].name.clone();
@@ -554,8 +554,7 @@ impl TerminalApp {
             }
             "folder" => {
                 let _ = std::fs::create_dir_all(&self.theme_store.dir);
-                let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-                if let Err(e) = std::process::Command::new(opener).arg(&self.theme_store.dir).spawn() {
+                if let Err(e) = crate::worker::open_path(&self.theme_store.dir) {
                     self.status = format!("Could not open {}: {e}", self.theme_store.dir.display());
                 }
             }
@@ -681,7 +680,7 @@ impl TerminalApp {
             if ui.button("Import").clicked() && !self.io_path.trim().is_empty() {
                 let p = self.io_path.trim();
                 let p = match p.strip_prefix("~/") {
-                    Some(rest) => std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default().join(rest),
+                    Some(rest) => crate::worker::home_dir().unwrap_or_default().join(rest),
                     None => p.into(),
                 };
                 cmds.push(SettingsCmd::Layout(LayoutOp::Import(p)));
@@ -689,7 +688,7 @@ impl TerminalApp {
             if ui.button("Export Current").clicked() {
                 let p = self.io_path.trim();
                 let path = (!p.is_empty()).then(|| match p.strip_prefix("~/") {
-                    Some(rest) => std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default().join(rest),
+                    Some(rest) => crate::worker::home_dir().unwrap_or_default().join(rest),
                     None => p.into(),
                 });
                 cmds.push(SettingsCmd::Layout(LayoutOp::Export(self.layout_name.clone(), path)));
