@@ -106,7 +106,7 @@ gets the native title bar with traffic lights, window vibrancy behind the sideba
     row in a linked watchlist or world-markets pane loads it into the group.
   - **Saved layouts**: save, name, rename, duplicate, delete and switch (`LAYOUT <name>`, the
     sidebar list, ⌥1…⌥9); the active layout autosaves and is restored on launch. Each layout is a
-    JSON file in `~/Library/Application Support/terminal-rs/layouts` (`$XDG_DATA_HOME` on Linux)
+    JSON file in `~/Library/Application Support/terminal-rs/layouts` (`$XDG_DATA_HOME` on Linux, `%APPDATA%` on Windows)
     and can be imported or exported (`LAYOUT EXPORT`/`IMPORT`, or Settings › Layouts). Per-pane
     settings (chart type, indicators, drawings, filters, depth, link, tab title) and, optionally,
     the theme (`LAYOUT THEME ON`) save with the layout.
@@ -139,7 +139,7 @@ APCA_API_KEY_ID=… APCA_API_SECRET_KEY=… cargo run --release   # Alpaca
 ```
 
 Data lives in `~/Library/Application Support/terminal-rs` (macOS) or
-`$XDG_DATA_HOME/terminal-rs` (Linux), or `TR_DATA_DIR`. The first congress ingest covers the
+`$XDG_DATA_HOME/terminal-rs` (Linux) or `%APPDATA%\terminal-rs` (Windows), or `TR_DATA_DIR`. The first congress ingest covers the
 current and previous year (a few minutes; it runs in the background while you work).
 `cargo run -p tr-congress --example ingest -- congress.sqlite3` runs one ingest from the CLI.
 
@@ -148,6 +148,13 @@ chart anti-aliasing (default 4 on macOS), `TR_VIBRANCY=0` disables the transluce
 ⌃⌘S (Ctrl+Shift+S elsewhere) toggles the sidebar. `scripts/bundle-macos.sh` builds a retina-capable
 `terminal-rs.app`; `scripts/check-macos-cross.sh` compiles and lints the whole workspace for
 aarch64-apple-darwin from Linux (zig as the C cross-compiler; linking needs the macOS SDK).
+
+### Building on Windows
+
+Install Rust with [rustup](https://rustup.rs) (MSVC toolchain, the default) and the
+**Visual Studio C++ Build Tools** ("Desktop development with C++"): `aws-lc-sys`, used by rustls,
+compiles C code. Then `cargo run --release` as above. Data lives in `%APPDATA%\terminal-rs`;
+⌘ is Ctrl and ⌥ is Alt. The window uses the generic title bar (no native chrome styling).
 
 ## Keyboard shortcuts and commands
 

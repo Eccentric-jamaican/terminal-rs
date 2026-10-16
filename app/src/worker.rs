@@ -220,11 +220,26 @@ impl Shared {
     }
 }
 
+/// The user's home directory: `HOME`, or `USERPROFILE` on Windows.
+pub fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| if cfg!(windows) { std::env::var_os("USERPROFILE") } else { None })
+        .map(PathBuf::from)
+}
+
+/// Where settings, caches, themes and layouts live: `TR_DATA_DIR`, else
+/// `~/Library/Application Support/terminal-rs` (macOS), `%APPDATA%\terminal-rs` (Windows)
+/// or `$XDG_DATA_HOME/terminal-rs` (Linux and others).
 pub fn data_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("TR_DATA_DIR") {
         return PathBuf::from(d);
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    if cfg!(windows) {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            return PathBuf::from(appdata).join("terminal-rs");
+        }
+    }
+    let home = home_dir().unwrap_or_else(|| PathBuf::from("."));
     if cfg!(target_os = "macos") {
         home.join("Library/Application Support/terminal-rs")
     } else {
@@ -232,6 +247,18 @@ pub fn data_dir() -> PathBuf {
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".local/share"))
             .join("terminal-rs")
+    }
+}
+
+/// Open a file or folder with the platform's default handler.
+pub fn open_path(target: &std::path::Path) -> std::io::Result<std::process::Child> {
+    if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg(target).spawn()
+    } else if cfg!(windows) {
+        // `start` is a cmd builtin; the empty string is the window title argument.
+        std::process::Command::new("cmd").args(["/C", "start", ""]).arg(target).spawn()
+    } else {
+        std::process::Command::new("xdg-open").arg(target).spawn()
     }
 }
 

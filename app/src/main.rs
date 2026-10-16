@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 //! terminal-rs: a keyboard-driven, Bloomberg-style market terminal with GPU charts and
 //! congressional (STOCK Act) trade tracking.
 
@@ -20,6 +22,13 @@ use std::time::Instant;
 
 fn main() -> eframe::Result {
     let t0 = Instant::now();
+    // Intel's Vulkan driver (igvk64.dll) crashes at startup when the exe runs as a
+    // GUI-subsystem app, so default to DX12 on Windows. WGPU_BACKEND still overrides.
+    #[cfg(windows)]
+    if std::env::var_os("WGPU_BACKEND").is_none() {
+        // SAFETY: single-threaded at this point; no other threads read the environment yet.
+        unsafe { std::env::set_var("WGPU_BACKEND", "dx12") };
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
